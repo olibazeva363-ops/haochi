@@ -486,7 +486,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// 终态收口：透传路径的 OAuth 与非透传完全一致，同样强制统一出站身份
 	// （User-Agent / originator / version 同源自洽），客户端自报身份不会到达上游。
 	if account.Type == AccountTypeOAuth {
-		enforceCodexIdentityHeaders(req.Header)
+		enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
 	}
 
 	if req.Header.Get("content-type") == "" {
@@ -909,10 +909,7 @@ func openAIStreamFailedEventSemanticStatus(payload []byte, message string) int {
 		return http.StatusBadRequest
 	}
 
-	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "response.error.code").String()))
-	if code == "" {
-		code = strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "error.code").String()))
-	}
+	code := openAIStreamFailedEventErrorCode(payload)
 	errType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "response.error.type").String()))
 	if errType == "" {
 		errType = strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "error.type").String()))

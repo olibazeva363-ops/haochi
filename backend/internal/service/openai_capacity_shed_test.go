@@ -2,16 +2,23 @@ package service
 
 import (
 	"context"
+<<<<<<< HEAD
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+=======
+	"net/http"
+>>>>>>> 2eb24814f (fix(codex): 强制统一出站身份并让客户端版本号跟随官方发布)
 	"strings"
 	"testing"
 	"time"
 
+<<<<<<< HEAD
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
+=======
+>>>>>>> 2eb24814f (fix(codex): 强制统一出站身份并让客户端版本号跟随官方发布)
 	"github.com/stretchr/testify/require"
 )
 
@@ -76,6 +83,7 @@ func TestStreamFailedEventCapacityShedRetriesOnSameAccount(t *testing.T) {
 	require.False(t, openAIStreamFailedEventRetryableOnSameAccount(nonPool, other, "boom"))
 }
 
+<<<<<<< HEAD
 // 上游降载的真实序列是「event: error → event: response.failed」。error 帧不算
 // 客户端输出：若把它当首输出 flush，clientOutputStarted 被固化，随后的 failed
 // 事件就进不了 pre-output failover 分支，只能把致命错误原样转发给客户端。
@@ -240,4 +248,17 @@ func TestSanitizeOpenAICapacityShedErrorCodeForClient(t *testing.T) {
 			}
 		})
 	}
+=======
+// 出站身份的版本声明只能有一个来源：UA 的版本段、version 头、探针版本三处必须同源，
+// 各自硬编码会漂移成互相矛盾的身份，而自相矛盾或陈旧的身份会被上游优先降载。
+func TestCodexOutboundVersionHasSingleSource(t *testing.T) {
+	require.True(t,
+		strings.HasPrefix(codexCLIUserAgent, "codex_cli_rs/"+codexCLIVersion+" "),
+		"codexCLIUserAgent=%q 必须以 codexCLIVersion=%q 作为版本段", codexCLIUserAgent, codexCLIVersion,
+	)
+	require.Equal(t, codexCLIVersion, openAICodexProbeVersion)
+	require.GreaterOrEqual(t, CompareVersions(codexCLIVersion, codexUpstreamMinVersion), 0,
+		"codexCLIVersion=%q 不得低于上游最低门槛 %q", codexCLIVersion, codexUpstreamMinVersion,
+	)
+>>>>>>> 2eb24814f (fix(codex): 强制统一出站身份并让客户端版本号跟随官方发布)
 }

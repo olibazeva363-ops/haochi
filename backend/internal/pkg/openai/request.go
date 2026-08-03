@@ -57,17 +57,6 @@ var codexOfficialClientOriginators = map[string]bool{
 	"codex_sdk_ts":          true, // TypeScript SDK
 }
 
-// IsBrowserUserAgent 判断 User-Agent 是否来自浏览器（Chrome/Firefox/Safari/Edge/Opera 等）。
-// 所有现代浏览器的 UA 均以 "Mozilla/" 作为前缀，CLI 工具（codex/claude/curl/postman/python-requests 等）不会。
-// 该判定用于避免 Cloudflare 对浏览器型 UA 在 OpenAI 上游接口上触发 JS 质询。
-func IsBrowserUserAgent(userAgent string) bool {
-	ua := strings.TrimSpace(userAgent)
-	if ua == "" {
-		return false
-	}
-	return strings.HasPrefix(strings.ToLower(ua), "mozilla/")
-}
-
 // IsCodexCLIRequest checks if the User-Agent indicates a Codex CLI request
 func IsCodexCLIRequest(userAgent string) bool {
 	ua := normalizeCodexClientHeader(userAgent)
@@ -253,6 +242,27 @@ func canonicalizeCodexOriginator(name string) string {
 		return lower
 	}
 	return name
+}
+
+// CodexCLIOriginator 官方 Codex CLI 默认 originator（codex-rs DEFAULT_ORIGINATOR），
+// 也是身份归一化的目标身份。
+const CodexCLIOriginator = "codex_cli_rs"
+
+// CodexUserAgentVersion 提取 Codex UA 的完整版本段，即 `{client}/{version} (...` 中的 version。
+// 与 ParseCodexEngineVersion 的区别：后者只取三段数字用于引擎版本比较（会丢掉 -alpha.4
+// 之类的预发布后缀），本函数保留原样，因为出站 version 头必须与 UA 版本段逐字一致。
+// 取不到（非 Codex 形态 UA）时返回空串。
+func CodexUserAgentVersion(userAgent string) string {
+	ua := strings.TrimSpace(userAgent)
+	slash := strings.IndexByte(ua, '/')
+	if slash <= 0 {
+		return ""
+	}
+	rest := ua[slash+1:]
+	if space := strings.IndexByte(rest, ' '); space >= 0 {
+		rest = rest[:space]
+	}
+	return strings.TrimSpace(rest)
 }
 
 // codexEngineVersionPattern 提取版本段开头的三段数字 X.Y.Z（忽略 -alpha 等后缀）。

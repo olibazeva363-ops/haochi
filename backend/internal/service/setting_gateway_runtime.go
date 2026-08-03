@@ -91,6 +91,19 @@ type cachedOpenAICodexUserAgent struct {
 	expiresAt int64 // unix nano
 }
 
+// cachedOpenAICodexClientVersion 缓存出站 Codex 客户端版本号（进程内缓存，60s TTL）
+type cachedOpenAICodexClientVersion struct {
+	version   string
+	expiresAt int64 // unix nano
+}
+
+const openAICodexClientVersionCacheTTL = 60 * time.Second
+const openAICodexClientVersionErrorTTL = 5 * time.Second
+const openAICodexClientVersionDBTimeout = 5 * time.Second
+
+// openAICodexClientVersionSFKey singleflight 键。
+const openAICodexClientVersionSFKey = "openai_codex_client_version"
+
 type cachedOpenAIQuotaAutoPauseSettings struct {
 	settings  OpsOpenAIAccountQuotaAutoPauseSettings
 	expiresAt int64
@@ -280,6 +293,88 @@ func (s *SettingService) GetOpenAICodexUserAgent(ctx context.Context) string {
 		return ua
 	}
 	return fallback
+}
+
+// GetOpenAICodexClientVersion 返回出站声明的 Codex 客户端版本号。
+// 优先级：管理员在面板覆写的版本 → 自动同步到的官方最新稳定版 → 内置常量。
+// 上游在容量紧张时按客户端身份分优先级降载，陈旧版本会被优先丢弃，故该值需保持跟随官方发布；
+// 自动同步让运维不必为了跟版本而发新版本。
+func (s *SettingService) GetOpenAICodexClientVersion(ctx context.Context) string {
+	fallback := codexCLIVersion
+	if s == nil || s.settingRepo == nil {
+		return fallback
+	}
+	if cached, ok := s.openAICodexVersionCache.Load().(*cachedOpenAICodexClientVersion); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.version
+		}
+	}
+
+	result, _, _ := s.openAICodexVersionSF.Do(openAICodexClientVersionSFKey, func() (any, error) {
+		if cached, ok := s.openAICodexVersionCache.Load().(*cachedOpenAICodexClientVersion); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return cached.version, nil
+			}
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openAICodexClientVersionDBTimeout)
+		defer cancel()
+		values, err := s.settingRepo.GetMultiple(dbCtx, []string{
+			SettingKeyOpenAICodexClientVersion,
+			SettingKeyOpenAICodexClientVersionSynced,
+		})
+		if err != nil {
+			slog.Warn("failed to get openai codex client version setting", "error", err)
+			s.openAICodexVersionCache.Store(&cachedOpenAICodexClientVersion{
+				version:   fallback,
+				expiresAt: time.Now().Add(openAICodexClientVersionErrorTTL).UnixNano(),
+			})
+			return fallback, nil
+		}
+		version := NormalizeCodexClientVersion(values[SettingKeyOpenAICodexClientVersion])
+		if version == "" {
+			version = NormalizeCodexClientVersion(values[SettingKeyOpenAICodexClientVersionSynced])
+		}
+		if version == "" {
+			version = fallback
+		}
+		s.openAICodexVersionCache.Store(&cachedOpenAICodexClientVersion{
+			version:   version,
+			expiresAt: time.Now().Add(openAICodexClientVersionCacheTTL).UnixNano(),
+		})
+		return version, nil
+	})
+	if version, ok := result.(string); ok && version != "" {
+		return version
+	}
+	return fallback
+}
+
+// InvalidateOpenAICodexClientVersionCache 丢弃版本号缓存，下次读取回源。
+// 面板保存与自动同步写入后调用。
+func (s *SettingService) InvalidateOpenAICodexClientVersionCache() {
+	if s == nil {
+		return
+	}
+	s.openAICodexVersionSF.Forget(openAICodexClientVersionSFKey)
+	s.openAICodexVersionCache.Store((*cachedOpenAICodexClientVersion)(nil))
+}
+
+// GetOpenAICodexCanonicalUserAgent 返回出站规范 Codex User-Agent。
+// 管理员在面板显式填写的完整 UA 优先；否则按当前生效的客户端版本号拼出标准 CLI UA。
+//
+// 面板值等于编译期兜底常量时视同未填写：两者不可区分，而按版本号拼装能拿到更新的版本，
+// 需要固定版本请填「Codex 客户端版本号」并关闭自动同步。
+func (s *SettingService) GetOpenAICodexCanonicalUserAgent(ctx context.Context) string {
+	if s == nil {
+		return codexCLIUserAgent
+	}
+	if ua := strings.TrimSpace(s.GetOpenAICodexUserAgent(ctx)); ua != "" && ua != DefaultOpenAICodexUserAgent {
+		return ua
+	}
+	return buildCodexCLIUserAgent(s.GetOpenAICodexClientVersion(ctx))
 }
 
 var legacyClaudeCodeCodexWhitelistEntry = openai.AllowedClientEntry{
