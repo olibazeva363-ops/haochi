@@ -288,6 +288,17 @@ func (s *SchedulerSnapshotService) GetGroupByID(ctx context.Context, groupID int
 	return s.groupRepo.GetByID(ctx, groupID)
 }
 
+// GetGroupByIDLite 获取分组配置但不加载账号计数聚合。
+// 利润门只需要平台、倍率、利润与高峰字段，GetByID 附带的那条账号计数聚合
+// 查询纯属浪费——composite / 模型路由 / fallback 每次装门都要付一次，WS 更是
+// 每个 turn 一次，且发生在「是否启用利润控制」判定之前。
+func (s *SchedulerSnapshotService) GetGroupByIDLite(ctx context.Context, groupID int64) (*Group, error) {
+	if s.groupRepo == nil {
+		return nil, nil
+	}
+	return s.groupRepo.GetByIDLite(ctx, groupID)
+}
+
 // UpdateAccountInCache 立即更新 Redis 中单个账号的数据（用于模型限流后立即生效）
 func (s *SchedulerSnapshotService) UpdateAccountInCache(ctx context.Context, account *Account) error {
 	if s.cache == nil || account == nil {
@@ -981,7 +992,7 @@ func (s *SchedulerSnapshotService) setRebuildSnapshot(
 		return err
 	}
 	if queries.remaining[key] > 1 {
-		// 必须保存 writeAccounts 实际接受的有序 ID，不能从原账号切片重新推导；
+		// 必须保存实际成功编码并写入的有序 ID，不能从原账号切片重新推导；
 		// 否则不可编码账号会只出现在后续桶中，破坏两个快照的成员一致性。
 		// 返回切片由当前批次独占，直接接管可避免 10k 账号场景再次复制。
 		queries.snapshotAccountIDs[key] = accountIDs

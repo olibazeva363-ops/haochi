@@ -150,9 +150,6 @@ func (m *mockAccountRepoForGemini) ListSchedulableUngroupedByPlatforms(ctx conte
 func (m *mockAccountRepoForGemini) ListModelAvailabilityCandidates(ctx context.Context, _ *int64, platforms []string, _ bool) ([]Account, error) {
 	return m.ListSchedulableByPlatforms(ctx, platforms)
 }
-func (m *mockAccountRepoForGemini) ListRateLimitedAccountsForProbe(ctx context.Context, platforms []string, minCooldownRemaining time.Duration, limit int) ([]Account, error) {
-	return nil, nil
-}
 func (m *mockAccountRepoForGemini) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {
 	return nil
 }

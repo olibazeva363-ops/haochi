@@ -36,7 +36,6 @@ func TestRedactAuditBody_JSONRedactsSecrets(t *testing.T) {
 		"name": "acc1",
 		"base_url": "https://evil.example.com",
 		"credentials": {"api_key": "sk-secret-123", "base_url": "https://evil.example.com"},
-		"sk": "sk-user-convert-secret",
 		"new_password": "hunter2",
 		"totp_code": "123456",
 		"nested": [{"access_token": "tok_abc"}]
@@ -49,7 +48,7 @@ func TestRedactAuditBody_JSONRedactsSecrets(t *testing.T) {
 	}
 
 	// 敏感字段被擦除。
-	for _, secret := range []string{"sk-secret-123", "sk-user-convert-secret", "hunter2", "123456", "tok_abc"} {
+	for _, secret := range []string{"sk-secret-123", "hunter2", "123456", "tok_abc"} {
 		if strings.Contains(out, secret) {
 			t.Fatalf("redacted body still contains secret %q: %s", secret, out)
 		}
@@ -60,6 +59,20 @@ func TestRedactAuditBody_JSONRedactsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(out, "acc1") {
 		t.Fatalf("name should be preserved: %s", out)
+	}
+}
+
+// 裸键 "session"（Ollama Cloud 会话保存的请求体字段）值整体就是浏览器 Cookie 明文，
+// 必须命中键级脱敏；session_id 等运行态标识不受影响，保留以便追责。
+func TestRedactAuditBody_BareSessionKeyRedacted(t *testing.T) {
+	raw := []byte(`{"session": "wos-session=cookie-canary", "session_id": "sid-visible"}`)
+	out := RedactAuditBody(raw, "application/json")
+
+	if strings.Contains(out, "cookie-canary") {
+		t.Fatalf("redacted body still contains the session cookie: %s", out)
+	}
+	if !strings.Contains(out, "sid-visible") {
+		t.Fatalf("session_id should be preserved for accountability: %s", out)
 	}
 }
 

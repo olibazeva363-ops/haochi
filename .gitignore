@@ -143,10 +143,3 @@ docs/*
 frontend/coverage/
 aicodex
 output/
-
-# local artifacts (added by sync)
-.pnpm-store/
-claude_oauth_json/
-single_sk_sub2api_*.json
-sub2api-fable-fix.tar
-Dockerfile.codex-build

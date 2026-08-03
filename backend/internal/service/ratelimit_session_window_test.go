@@ -146,9 +146,6 @@ func (m *sessionWindowMockRepo) ListSchedulableUngroupedByPlatforms(context.Cont
 func (m *sessionWindowMockRepo) ListModelAvailabilityCandidates(context.Context, *int64, []string, bool) ([]Account, error) {
 	panic("unexpected")
 }
-func (m *sessionWindowMockRepo) ListRateLimitedAccountsForProbe(context.Context, []string, time.Duration, int) ([]Account, error) {
-	panic("unexpected")
-}
 func (m *sessionWindowMockRepo) SetRateLimited(context.Context, int64, time.Time) error {
 	panic("unexpected")
 }
@@ -440,55 +437,5 @@ func TestUpdateSessionWindow_NoStatusHeader(t *testing.T) {
 
 	if len(repo.sessionWindowCalls) != 0 {
 		t.Errorf("expected no calls when status header absent, got %d", len(repo.sessionWindowCalls))
-	}
-}
-
-func TestUpdateSessionWindow_AllowedWarningClearsStaleAccountRateLimit(t *testing.T) {
-	resetAt := time.Now().Add(30 * time.Minute)
-	repo := &sessionWindowMockRepo{}
-	svc := newRateLimitServiceForTest(repo)
-
-	account := &Account{ID: 92, RateLimitResetAt: &resetAt}
-	headers := http.Header{}
-	headers.Set("anthropic-ratelimit-unified-5h-status", "allowed_warning")
-
-	svc.UpdateSessionWindow(context.Background(), account, headers)
-
-	if len(repo.clearRateLimitIDs) != 1 || repo.clearRateLimitIDs[0] != 92 {
-		t.Fatalf("expected stale rate limit cleared for account 92, got %#v", repo.clearRateLimitIDs)
-	}
-}
-
-func TestUpdateSessionWindow_DoesNotClearWhen5hWindowRejected(t *testing.T) {
-	resetAt := time.Now().Add(30 * time.Minute)
-	repo := &sessionWindowMockRepo{}
-	svc := newRateLimitServiceForTest(repo)
-
-	account := &Account{ID: 93, RateLimitResetAt: &resetAt}
-	headers := http.Header{}
-	headers.Set("anthropic-ratelimit-unified-5h-status", "rejected")
-	headers.Set("anthropic-ratelimit-unified-5h-utilization", "1.0")
-
-	svc.UpdateSessionWindow(context.Background(), account, headers)
-
-	if len(repo.clearRateLimitIDs) != 0 {
-		t.Fatalf("expected active 5h rate limit to remain, got cleared IDs %#v", repo.clearRateLimitIDs)
-	}
-}
-
-func TestUpdateSessionWindow_DoesNotClearWhen7dWindowRejected(t *testing.T) {
-	resetAt := time.Now().Add(30 * time.Minute)
-	repo := &sessionWindowMockRepo{}
-	svc := newRateLimitServiceForTest(repo)
-
-	account := &Account{ID: 94, RateLimitResetAt: &resetAt}
-	headers := http.Header{}
-	headers.Set("anthropic-ratelimit-unified-5h-status", "allowed")
-	headers.Set("anthropic-ratelimit-unified-7d-status", "rejected")
-
-	svc.UpdateSessionWindow(context.Background(), account, headers)
-
-	if len(repo.clearRateLimitIDs) != 0 {
-		t.Fatalf("expected active 7d rate limit to remain, got cleared IDs %#v", repo.clearRateLimitIDs)
 	}
 }

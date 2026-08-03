@@ -526,14 +526,13 @@ func (s *TokenRefreshService) processRefreshContext(parent context.Context) {
 			break
 		}
 		page, err := pager.ListOAuthRefreshCandidatePage(ctx, OAuthRefreshPageOptions{
-			Platforms:               platforms,
-			AfterID:                 afterID,
-			Limit:                   pageSize,
-			ActiveOnly:              true,
-			IncludeRecoverableError: true,
-			IncludeSetupToken:       true,
-			RequireRefreshToken:     true,
-			ExcludeRetryCooldown:    true,
+			Platforms:            platforms,
+			AfterID:              afterID,
+			Limit:                pageSize,
+			ActiveOnly:           true,
+			IncludeSetupToken:    true,
+			RequireRefreshToken:  true,
+			ExcludeRetryCooldown: true,
 		})
 		if err != nil {
 			slog.Error("token_refresh.list_accounts_failed", "error", err, "after_id", afterID)
@@ -983,7 +982,7 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 			return &providerConfigurationRefreshError{err: err}
 		}
 
-		// 不可重试错误（invalid_grant/invalid_client 等）直接标记 error 状态并返回
+		// SK 转换站临时性错误（Cloudflare/限流/上游抖动等）可重试，走退避
 		if IsClaudeSKConvertTemporaryError(err) {
 			lastErr = err
 			slog.Warn("token_refresh.sk_convert_temporary_failed",
@@ -1005,6 +1004,7 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 			continue
 		}
 
+		// SK 转换站环境类错误（未配置转换 Cookie 等）：不重试，保留 lastErr 后跳出
 		if IsClaudeSKImportAccount(account) && isClaudeSKConverterEnvironmentError(err) {
 			lastErr = err
 			slog.Warn("token_refresh.sk_convert_environment_failed",
@@ -1014,8 +1014,9 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 			break
 		}
 
+		// 不可重试错误（invalid_grant/invalid_client 等）直接标记 error 状态并返回
 		if isNonRetryableRefreshError(err) || isClaudeSKAccountPermanentError(err) || (!IsClaudeSKImportAccount(account) && isClaudeSKConvertPermanentError(err)) {
-			errorMsg := refreshErrorStatusMessage(err)
+			errorMsg := "Token refresh failed (non-retryable): " + logredact.RedactText(err.Error())
 			isGrokOAuth := account.IsGrokOAuth()
 			if !isGrokOAuth {
 				s.notifyAccountSchedulingBlocked(account, time.Time{}, "token_refresh_non_retryable")
@@ -1205,7 +1206,7 @@ func (s *TokenRefreshService) postRefreshActions(ctx context.Context, account *A
 			s.notifyAccountSchedulingBlockCleared(account.ID)
 		}
 	}
-	// 刷新成功后清除临时不可调度状态（处理 OAuth 401 恢复场景）
+	// SK 导入账号刷新成功后清除 error 状态并恢复可调度（处理 OAuth 401 恢复场景）
 	if IsClaudeSKImportAccount(account) && account.Status == StatusError {
 		if clearErr := s.accountRepo.ClearError(ctx, account.ID); clearErr != nil {
 			slog.Warn("token_refresh.clear_sk_import_account_error_failed",
@@ -1228,6 +1229,7 @@ func (s *TokenRefreshService) postRefreshActions(ctx context.Context, account *A
 			s.notifyAccountSchedulingBlockCleared(account.ID)
 		}
 	}
+	// 刷新成功后清除临时不可调度状态（处理 OAuth 401 恢复场景）
 	if account.TempUnschedulableUntil != nil && time.Now().Before(*account.TempUnschedulableUntil) {
 		if clearErr := s.accountRepo.ClearTempUnschedulable(ctx, account.ID); clearErr != nil {
 			slog.Warn("token_refresh.clear_temp_unschedulable_failed",

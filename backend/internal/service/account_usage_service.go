@@ -345,6 +345,13 @@ func (s *AccountUsageService) GetUsage(ctx context.Context, accountID int64, for
 		return nil, fmt.Errorf("get account failed: %w", err)
 	}
 
+	// Dedicated UI load-test accounts must remain fully interactive without ever
+	// contacting Anthropic with synthetic credentials. Reuse the same persisted
+	// passive snapshot that the account table loads on mount.
+	if account.IsSyntheticUITest() && account.IsAnthropicOAuthOrSetupToken() {
+		return s.GetPassiveUsage(ctx, accountID)
+	}
+
 	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
 		usage, err := s.getOpenAIUsage(ctx, account, forceProbe)
 		if err == nil {
@@ -453,9 +460,6 @@ func (s *AccountUsageService) GetUsage(ctx context.Context, accountID int64, for
 		// 5. 将主动查询结果同步到被动缓存，下次 passive 加载即为最新值
 		s.syncActiveToPassive(ctx, account.ID, usage)
 
-		// 5b. 5h/7d 账号级窗口用量≥100% → 主动限流（已知无额度，排除调度 + 显示限流中）
-		s.maybeRateLimitExhaustedWindow(ctx, account, usage)
-
 		// 6. 上游 usage API 目前不一定下发 Fable 7d 窗口；缺失时回填被动采样
 		// （7d_oi 响应头）的数据，避免主动查询后 7d F 进度条丢失。
 		if usage.SevenDayFable == nil {
@@ -509,13 +513,30 @@ func (s *AccountUsageService) GetPassiveUsage(ctx context.Context, accountID int
 	// 构建 7d Fable 窗口（从被动采样的 7d_oi 响应头数据）
 	info.SevenDayFable = buildPassiveUsageWindow(account.Extra, "passive_usage_7d_oi_utilization", "passive_usage_7d_oi_reset")
 
-	// 5h/7d 账号级窗口用量≥100% → 主动限流（已知无额度，排除调度 + 显示限流中）
-	s.maybeRateLimitExhaustedWindow(ctx, account, info)
-
 	// 添加窗口统计
 	s.addWindowStats(ctx, account, info)
+	if account.IsSyntheticUITest() {
+		applySyntheticWindowStats(info, account.Extra)
+	}
 
 	return info, nil
+}
+
+func applySyntheticWindowStats(info *UsageInfo, extra map[string]any) {
+	if info == nil || info.FiveHour == nil || len(extra) == 0 {
+		return
+	}
+	raw, ok := extra["synthetic_window_stats"].(map[string]any)
+	if !ok {
+		return
+	}
+	info.FiveHour.WindowStats = &WindowStats{
+		Requests:     int64(parseExtraInt(raw["requests"])),
+		Tokens:       int64(parseExtraInt(raw["tokens"])),
+		Cost:         parseExtraFloat64(raw["cost"]),
+		StandardCost: parseExtraFloat64(raw["standard_cost"]),
+		UserCost:     parseExtraFloat64(raw["user_cost"]),
+	}
 }
 
 // buildPassiveUsageWindow 从 Extra 中的被动采样数据（utilization 为 0-1 小数、reset 为 Unix 秒）
@@ -578,52 +599,6 @@ func (s *AccountUsageService) syncActiveToPassive(ctx context.Context, accountID
 			slog.Warn("sync_active_to_passive_session_window_end_failed", "account_id", accountID, "error", err)
 		}
 	}
-}
-
-// maybeRateLimitExhaustedWindow：当 Anthropic 自报 5h/7d 账号级窗口用量已 ≥100%
-// 且窗口未重置时，主动将账号标记为限流到窗口 reset。信号来自上游权威用量（响应头/
-// usage API），因此已知无额度的号无需等待真实请求撞 429，即从调度中排除、并在列表
-// 显示为“限流中”。窗口重置后 rate_limit_reset_at 过期自动恢复。
-//
-// 仅处理 5h / 7d 账号级窗口；Fable 专属的 7d_oi 属模型级，由 429 响应体解析单独冷却，
-// 不在此处升级为账号级限流（账号对其他模型仍可调度）。
-// 幂等：已被限流到不更早的时间点时不重复写，避免读路径反复触发 outbox / 调度快照刷新。
-func (s *AccountUsageService) maybeRateLimitExhaustedWindow(ctx context.Context, account *Account, usage *UsageInfo) {
-	if s == nil || s.accountRepo == nil || account == nil || usage == nil {
-		return
-	}
-	if account.Platform != PlatformAnthropic {
-		return
-	}
-	// 仅对"已确认无可用 overage"的号做主动剔除；有积分/状态未知的号留在池里用积分续，
-	// 只有真撞 5h/7d 429 被记为无 overage 后，才在此提前剔除，避免反复撞 429。
-	if !overageKnownUnavailable(account) {
-		return
-	}
-	now := time.Now()
-	var reset time.Time
-	if usage.FiveHour != nil && usage.FiveHour.Utilization >= 100 &&
-		usage.FiveHour.ResetsAt != nil && usage.FiveHour.ResetsAt.After(now) && usage.FiveHour.ResetsAt.After(reset) {
-		reset = *usage.FiveHour.ResetsAt
-	}
-	if usage.SevenDay != nil && usage.SevenDay.Utilization >= 100 &&
-		usage.SevenDay.ResetsAt != nil && usage.SevenDay.ResetsAt.After(now) && usage.SevenDay.ResetsAt.After(reset) {
-		reset = *usage.SevenDay.ResetsAt
-	}
-	if reset.IsZero() {
-		return
-	}
-	// 已被限流且到期不早于该 reset → 无需重复写
-	if account.RateLimitResetAt != nil && !account.RateLimitResetAt.Before(reset) {
-		return
-	}
-	if err := s.accountRepo.SetRateLimited(ctx, account.ID, reset); err != nil {
-		slog.Warn("anthropic_passive_window_rate_limit_failed", "account_id", account.ID, "error", err)
-		return
-	}
-	account.RateLimitResetAt = &reset
-	slog.Info("anthropic_passive_window_rate_limited", "account_id", account.ID, "reset_at", reset,
-		"reset_in", time.Until(reset).Truncate(time.Second))
 }
 
 func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {

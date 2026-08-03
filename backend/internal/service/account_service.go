@@ -22,14 +22,13 @@ const AccountPrivacyModeUnsetFilter = "__unset__"
 // accounts. Candidate platforms are supplied by TokenRefreshService's refresher
 // registry so repository eligibility cannot drift from registered providers.
 type OAuthRefreshPageOptions struct {
-	Platforms               []string
-	AfterID                 int64
-	Limit                   int
-	ActiveOnly              bool
-	IncludeRecoverableError bool
-	IncludeSetupToken       bool
-	RequireRefreshToken     bool
-	ExcludeRetryCooldown    bool
+	Platforms            []string
+	AfterID              int64
+	Limit                int
+	ActiveOnly           bool
+	IncludeSetupToken    bool
+	RequireRefreshToken  bool
+	ExcludeRetryCooldown bool
 }
 
 // OAuthRefreshCandidatePage keeps cursor metadata from the raw SQL ID page.
@@ -86,6 +85,10 @@ type AccountRepository interface {
 
 	ListSchedulable(ctx context.Context) ([]Account, error)
 	ListSchedulableByGroupID(ctx context.Context, groupID int64) ([]Account, error)
+	// ListRateLimitedAccountsForProbe 返回「仅因限流冷却而不可调度、且剩余冷却时间
+	// 超过 minCooldownRemaining」的 active+schedulable 账号，按最早恢复排序。
+	// 供半开重探 runner 带外主动重探仍在冷却中的账号使用。
+	ListRateLimitedAccountsForProbe(ctx context.Context, platforms []string, minCooldownRemaining time.Duration, limit int) ([]Account, error)
 	ListSchedulableByPlatform(ctx context.Context, platform string) ([]Account, error)
 	ListSchedulableByGroupIDAndPlatform(ctx context.Context, groupID int64, platform string) ([]Account, error)
 	ListSchedulableByPlatforms(ctx context.Context, platforms []string) ([]Account, error)
@@ -99,10 +102,6 @@ type AccountRepository interface {
 	// When groupID is nil, includeGrouped controls whether the query scans all
 	// matching accounts or only accounts without a group binding.
 	ListModelAvailabilityCandidates(ctx context.Context, groupID *int64, platforms []string, includeGrouped bool) ([]Account, error)
-	// ListRateLimitedAccountsForProbe 返回「仅因限流冷却而不可调度、且剩余冷却时间
-	// 超过 minCooldownRemaining」的 active+schedulable 账号，按最早恢复排序。
-	// 供半开重探 runner 带外主动重探仍在冷却中的账号使用。
-	ListRateLimitedAccountsForProbe(ctx context.Context, platforms []string, minCooldownRemaining time.Duration, limit int) ([]Account, error)
 
 	SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error
 	SetModelRateLimit(ctx context.Context, id int64, scope string, resetAt time.Time, reason ...string) error
@@ -136,11 +135,25 @@ type AccountDuplicateRepository interface {
 	CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error
 }
 
+// AccountBillingSettingsRepository applies an admin edit without overwriting a
+// rate_multiplier that a successful upstream probe synchronized after the edit
+// form was loaded. A nil rateMultiplier means the request did not edit it.
+type AccountBillingSettingsRepository interface {
+	UpdateWithAccountBillingSettings(
+		ctx context.Context,
+		account *Account,
+		probeEnabled *bool,
+		rateSyncEnabled *bool,
+		rateMultiplier *float64,
+	) error
+}
+
 // AdminAccountRepository makes the account-duplication write capability an explicit
 // construction dependency without forcing read-only gateway test doubles to implement it.
 type AdminAccountRepository interface {
 	AccountRepository
 	AccountDuplicateRepository
+	AccountBillingSettingsRepository
 }
 
 // AccountBulkUpdate describes the fields that can be updated in a bulk operation.
@@ -320,7 +333,14 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 	}
 
 	if req.Extra != nil {
-		account.Extra = *req.Extra
+		extra := make(map[string]any, len(*req.Extra))
+		for key, value := range *req.Extra {
+			extra[key] = value
+		}
+		delete(extra, OllamaCloudUsageSessionExtraKey)
+		delete(extra, OllamaCloudUsageAutoRefreshExtraKey)
+		delete(extra, OllamaCloudUsageSnapshotExtraKey)
+		account.Extra = extra
 	}
 
 	if req.ProxyID != nil {

@@ -66,7 +66,7 @@ const DefaultCacheControlTTL = "5m"
 // CLICurrentVersion 是 sub2api 当前对外伪装的 Claude Code CLI 版本号（三段 semver）。
 // 用于 billing attribution block 中的 cc_version=X.Y.Z.{fp} 前缀以及 fingerprint 计算。
 // 必须与 DefaultHeaders["User-Agent"] 中的版本号严格一致；不一致会被 Anthropic 判第三方。
-const CLICurrentVersion = "2.1.161"
+const CLICurrentVersion = "2.1.220"
 
 // FullClaudeCodeMimicryBetas 返回最"像"真实 Claude Code CLI 的完整 beta 列表，
 // 用于 OAuth 账号伪装成 Claude Code 时使用。
@@ -124,12 +124,6 @@ var DefaultModels = []Model{
 		CreatedAt:   "2026-06-09T00:00:00Z",
 	},
 	{
-		ID:          "claude-opus-5",
-		Type:        "model",
-		DisplayName: "Claude Opus 5",
-		CreatedAt:   "2026-07-24T00:00:00Z",
-	},
-	{
 		ID:          "claude-opus-4-5-20251101",
 		Type:        "model",
 		DisplayName: "Claude Opus 4.5",
@@ -152,6 +146,12 @@ var DefaultModels = []Model{
 		Type:        "model",
 		DisplayName: "Claude Opus 4.8",
 		CreatedAt:   "2026-05-29T00:00:00Z",
+	},
+	{
+		ID:          "claude-opus-5",
+		Type:        "model",
+		DisplayName: "Claude Opus 5",
+		CreatedAt:   "2026-07-25T00:00:00Z",
 	},
 	{
 		ID:          "claude-sonnet-5",
@@ -196,17 +196,6 @@ var ModelIDOverrides = map[string]string{
 	"claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
 	"claude-opus-4-5":   "claude-opus-4-5-20251101",
 	"claude-haiku-4-5":  "claude-haiku-4-5-20251001",
-
-	// 展示名（带点，如 "Claude Opus 4.8"）被客户端直接当作 model 传入时，
-	// 归一到官方连字符 ID，避免原样透传给上游导致 404「model not found」
-	// （上游会提示 "Did you mean claude-opus-4-8?"），进而被误记为模型级限流。
-	"claude-opus-4.8":   "claude-opus-4-8",
-	"claude-opus-4.7":   "claude-opus-4-7",
-	"claude-opus-4.6":   "claude-opus-4-6",
-	"claude-sonnet-4.6": "claude-sonnet-4-6",
-	"claude-opus-4.5":   "claude-opus-4-5-20251101",
-	"claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
-	"claude-haiku-4.5":  "claude-haiku-4-5-20251001",
 }
 
 // ModelIDReverseOverrides 用于将上游模型 ID 还原为短名

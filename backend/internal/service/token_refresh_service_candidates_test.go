@@ -21,9 +21,6 @@ type tokenRefreshCandidateRepo struct {
 	setErrorCalls         int
 	setTempUnschedCalls   int
 	clearTempCalls        int
-	clearErrorCalls       int
-	setSchedulableCalls   int
-	lastSchedulable       bool
 	lastTempUnschedReason string
 	listActiveCalls       int
 }
@@ -33,20 +30,6 @@ func (r *tokenRefreshCandidateRepo) ListActive(context.Context) ([]Account, erro
 	defer r.mu.Unlock()
 	r.listActiveCalls++
 	return r.accounts, nil
-}
-
-func (r *tokenRefreshCandidateRepo) GetByID(_ context.Context, id int64) (*Account, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i := range r.accounts {
-		if r.accounts[i].ID == id {
-			account := r.accounts[i]
-			account.Credentials = shallowCopyMap(r.accounts[i].Credentials)
-			account.Extra = shallowCopyMap(r.accounts[i].Extra)
-			return &account, nil
-		}
-	}
-	return nil, ErrAccountNotFound
 }
 
 func (r *tokenRefreshCandidateRepo) ListOAuthRefreshCandidatePage(_ context.Context, options OAuthRefreshPageOptions) (*OAuthRefreshCandidatePage, error) {
@@ -67,12 +50,11 @@ func (r *tokenRefreshCandidateRepo) ListOAuthRefreshCandidatePage(_ context.Cont
 				break
 			}
 		}
-		skImportAccount := options.IncludeRecoverableError && IsClaudeSKImportAccount(&account)
-		recoverableError := skImportAccount && account.Status == StatusError
-		if options.ActiveOnly && account.Status != StatusActive && !recoverableError ||
+		if options.ActiveOnly && account.Status != StatusActive ||
+			!account.Schedulable ||
 			account.Type != AccountTypeOAuth ||
 			!platformAllowed ||
-			options.RequireRefreshToken && strings.TrimSpace(refreshToken) == "" && !skImportAccount ||
+			options.RequireRefreshToken && strings.TrimSpace(refreshToken) == "" ||
 			options.ExcludeRetryCooldown && inRetryCooldown {
 			continue
 		}
@@ -88,16 +70,10 @@ func (r *tokenRefreshCandidateRepo) ListOAuthRefreshCandidatePage(_ context.Cont
 	return page, nil
 }
 
-func (r *tokenRefreshCandidateRepo) UpdateCredentials(_ context.Context, id int64, credentials map[string]any) error {
+func (r *tokenRefreshCandidateRepo) UpdateCredentials(_ context.Context, id int64, _ map[string]any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.updatedCredentialIDs = append(r.updatedCredentialIDs, id)
-	for i := range r.accounts {
-		if r.accounts[i].ID == id {
-			r.accounts[i].Credentials = shallowCopyMap(credentials)
-			return nil
-		}
-	}
 	return nil
 }
 
@@ -123,32 +99,6 @@ func (r *tokenRefreshCandidateRepo) ClearTempUnschedulable(context.Context, int6
 	return nil
 }
 
-func (r *tokenRefreshCandidateRepo) ClearError(_ context.Context, id int64) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.clearErrorCalls++
-	for i := range r.accounts {
-		if r.accounts[i].ID == id {
-			r.accounts[i].Status = StatusActive
-			r.accounts[i].ErrorMessage = ""
-		}
-	}
-	return nil
-}
-
-func (r *tokenRefreshCandidateRepo) SetSchedulable(_ context.Context, id int64, schedulable bool) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.setSchedulableCalls++
-	r.lastSchedulable = schedulable
-	for i := range r.accounts {
-		if r.accounts[i].ID == id {
-			r.accounts[i].Schedulable = schedulable
-		}
-	}
-	return nil
-}
-
 type tokenRefreshTestRefresher struct {
 	err error
 }
@@ -157,15 +107,11 @@ func (r *tokenRefreshTestRefresher) CanRefresh(*Account) bool { return true }
 
 func (r *tokenRefreshTestRefresher) NeedsRefresh(*Account, time.Duration) bool { return true }
 
-func (r *tokenRefreshTestRefresher) CacheKey(account *Account) string {
-	return ClaudeTokenCacheKey(account)
-}
-
-func (r *tokenRefreshTestRefresher) Refresh(_ context.Context, account *Account) (map[string]any, error) {
+func (r *tokenRefreshTestRefresher) Refresh(context.Context, *Account) (map[string]any, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	return MergeCredentials(account.Credentials, map[string]any{"access_token": "new-access-token", "refresh_token": "new-refresh-token"}), nil
+	return map[string]any{"access_token": "new-access-token", "refresh_token": "new-refresh-token"}, nil
 }
 
 func TestTokenRefreshService_ProcessRefreshUsesOAuthRefreshCandidates(t *testing.T) {
@@ -177,6 +123,7 @@ func TestTokenRefreshService_ProcessRefreshUsesOAuthRefreshCandidates(t *testing
 				Platform:    PlatformOpenAI,
 				Type:        AccountTypeOAuth,
 				Status:      StatusActive,
+				Schedulable: true,
 				Credentials: map[string]any{"refresh_token": "refresh-token"},
 			},
 			{
@@ -184,6 +131,7 @@ func TestTokenRefreshService_ProcessRefreshUsesOAuthRefreshCandidates(t *testing
 				Platform:    PlatformOpenAI,
 				Type:        AccountTypeOAuth,
 				Status:      StatusActive,
+				Schedulable: true,
 				Credentials: map[string]any{},
 			},
 			{
@@ -198,6 +146,7 @@ func TestTokenRefreshService_ProcessRefreshUsesOAuthRefreshCandidates(t *testing
 				Platform:                PlatformAntigravity,
 				Type:                    AccountTypeOAuth,
 				Status:                  StatusActive,
+				Schedulable:             true,
 				Credentials:             map[string]any{"refresh_token": "refresh-token"},
 				TempUnschedulableUntil:  &future,
 				TempUnschedulableReason: "token refresh retry exhausted: network timeout",
@@ -207,6 +156,7 @@ func TestTokenRefreshService_ProcessRefreshUsesOAuthRefreshCandidates(t *testing
 				Platform:    "other",
 				Type:        AccountTypeOAuth,
 				Status:      StatusActive,
+				Schedulable: true,
 				Credentials: map[string]any{"refresh_token": "refresh-token"},
 			},
 			{
@@ -214,10 +164,19 @@ func TestTokenRefreshService_ProcessRefreshUsesOAuthRefreshCandidates(t *testing
 				Platform:                PlatformAntigravity,
 				Type:                    AccountTypeOAuth,
 				Status:                  StatusActive,
+				Schedulable:             true,
 				Credentials:             map[string]any{"refresh_token": "refresh-token"},
 				Extra:                   map[string]any{"privacy_mode": AntigravityPrivacySet},
 				TempUnschedulableUntil:  &future,
 				TempUnschedulableReason: "OAuth 401: unauthorized",
+			},
+			{
+				ID:          7,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeOAuth,
+				Status:      StatusActive,
+				Schedulable: false,
+				Credentials: map[string]any{"refresh_token": "permanently-rejected-token"},
 			},
 		},
 	}
@@ -238,121 +197,6 @@ func TestTokenRefreshService_ProcessRefreshUsesOAuthRefreshCandidates(t *testing
 	require.Zero(t, repo.listActiveCalls, "TokenRefreshService should not use the broad active-account query")
 	require.ElementsMatch(t, []int64{1, 6}, repo.updatedCredentialIDs)
 	require.Equal(t, 1, repo.clearTempCalls, "successful refresh should clear the OAuth 401 temp-unschedulable state")
-}
-
-func TestTokenRefreshService_ProcessRefreshRecoversClaudeSKImportErrorAccount(t *testing.T) {
-	repo := &tokenRefreshCandidateRepo{
-		accounts: []Account{
-			{
-				ID:          10,
-				Platform:    PlatformAnthropic,
-				Type:        AccountTypeOAuth,
-				Status:      StatusError,
-				Schedulable: false,
-				Credentials: map[string]any{
-					"expires_at":                "1000",
-					ClaudeSKCookieCredentialKey: "sk-ant-sid02-original",
-				},
-				Extra:        map[string]any{"source": ClaudeSKImportSource},
-				ErrorMessage: "Token refresh failed (non-retryable): invalid_grant",
-			},
-			{
-				ID:          11,
-				Platform:    PlatformAnthropic,
-				Type:        AccountTypeOAuth,
-				Status:      StatusError,
-				Schedulable: false,
-				Credentials: map[string]any{
-					"refresh_token": "old-refresh-token",
-					"expires_at":    "1000",
-				},
-				Extra:        map[string]any{"source": ClaudeSKImportSource},
-				ErrorMessage: "ordinary error without preserved sk",
-			},
-		},
-	}
-	svc := &TokenRefreshService{
-		accountRepo:    repo,
-		candidatePager: repo,
-		registrations: []tokenRefreshRegistration{
-			{platform: PlatformAnthropic, refresher: &tokenRefreshTestRefresher{}, executor: &tokenRefreshTestRefresher{}},
-		},
-		refreshPolicy: DefaultBackgroundRefreshPolicy(),
-		refreshAPI:    NewOAuthRefreshAPI(repo, nil),
-		cfg:           &config.TokenRefreshConfig{RefreshBeforeExpiryHours: 1, MaxRetries: 1},
-	}
-
-	svc.processRefresh()
-
-	require.Equal(t, []int64{10}, repo.updatedCredentialIDs)
-	require.Equal(t, 1, repo.clearErrorCalls)
-	require.Equal(t, 1, repo.setSchedulableCalls)
-	require.True(t, repo.lastSchedulable)
-	require.Equal(t, StatusActive, repo.accounts[0].Status)
-	require.True(t, repo.accounts[0].Schedulable)
-	require.Equal(t, StatusError, repo.accounts[1].Status)
-}
-
-func TestTokenRefreshService_SKImportPermanentConvertErrorSetsError(t *testing.T) {
-	repo := &tokenRefreshCandidateRepo{}
-	svc := &TokenRefreshService{
-		accountRepo:   repo,
-		refreshPolicy: DefaultBackgroundRefreshPolicy(),
-		cfg:           &config.TokenRefreshConfig{MaxRetries: 1, RetryBackoffSeconds: 0},
-	}
-	account := &Account{
-		ID:          61,
-		Platform:    PlatformAnthropic,
-		Type:        AccountTypeOAuth,
-		Status:      StatusActive,
-		Schedulable: true,
-		Credentials: map[string]any{
-			ClaudeSKCookieCredentialKey: "sk-ant-sid02-dead",
-		},
-		Extra: map[string]any{"source": ClaudeSKImportSource},
-	}
-
-	err := svc.refreshWithRetry(context.Background(), account, &tokenRefreshTestRefresher{err: &ClaudeSKConvertError{
-		Kind:      ClaudeSKConvertKindSourceSKInvalid,
-		Message:   "source SK invalid",
-		Retryable: false,
-	}}, nil, time.Hour)
-
-	require.Error(t, err)
-	require.Equal(t, 1, repo.setErrorCalls)
-	require.Zero(t, repo.setTempUnschedCalls)
-}
-
-func TestTokenRefreshService_SKImportConverterEnvironmentErrorTempUnschedulable(t *testing.T) {
-	repo := &tokenRefreshCandidateRepo{}
-	svc := &TokenRefreshService{
-		accountRepo:   repo,
-		refreshPolicy: DefaultBackgroundRefreshPolicy(),
-		cfg:           &config.TokenRefreshConfig{MaxRetries: 1, RetryBackoffSeconds: 0},
-	}
-	account := &Account{
-		ID:          62,
-		Platform:    PlatformAnthropic,
-		Type:        AccountTypeOAuth,
-		Status:      StatusActive,
-		Schedulable: true,
-		Credentials: map[string]any{
-			ClaudeSKCookieCredentialKey: "sk-ant-sid02-valid",
-		},
-		Extra: map[string]any{"source": ClaudeSKImportSource},
-	}
-
-	err := svc.refreshWithRetry(context.Background(), account, &tokenRefreshTestRefresher{err: &ClaudeSKConvertError{
-		Kind:               ClaudeSKConvertKindCookieInvalid,
-		Message:            "converter cookie invalid",
-		Retryable:          false,
-		NeedsCookieRefresh: true,
-	}}, nil, time.Hour)
-
-	require.Error(t, err)
-	require.Zero(t, repo.setErrorCalls)
-	require.Equal(t, 1, repo.setTempUnschedCalls)
-	require.Contains(t, repo.lastTempUnschedReason, "converter")
 }
 
 func TestTokenRefreshService_RefreshFailureDoesNotCallPrivacy(t *testing.T) {

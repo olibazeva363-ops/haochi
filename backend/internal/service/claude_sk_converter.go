@@ -294,20 +294,20 @@ func classifyClaudeSKConvertHTTPError(statusCode int, body string) *ClaudeSKConv
 		message = "转换站 Cloudflare 校验失败"
 		retryable = false
 		needsCookie = true
-	case containsAny(lower, "invalid cookie", "cookie invalid", "not login", "not logged", "unauthorized", "未登录", "登录过期", "cookie过期"):
+	case skContainsAny(lower, "invalid cookie", "cookie invalid", "not login", "not logged", "unauthorized", "未登录", "登录过期", "cookie过期"):
 		kind = ClaudeSKConvertKindCookieInvalid
 		message = "转换站 Cookie 无效、过期或未登录"
 		retryable = false
 		needsCookie = true
-	case containsAny(lower, "invalid sk", "invalid sid", "sk invalid", "sid invalid", "cookie format", "无效sk", "sk无效", "sid无效", "账号凭据无效"):
+	case skContainsAny(lower, "invalid sk", "invalid sid", "sk invalid", "sid invalid", "cookie format", "无效sk", "sk无效", "sid无效", "账号凭据无效"):
 		kind = ClaudeSKConvertKindSourceSKInvalid
 		message = "原始 SK 无效或已过期"
 		retryable = false
-	case containsAny(lower, "banned", "suspended", "disabled", "revoked", "deactivated", "封禁", "被封", "吊销", "停用"):
+	case skContainsAny(lower, "banned", "suspended", "disabled", "revoked", "deactivated", "封禁", "被封", "吊销", "停用"):
 		kind = ClaudeSKConvertKindAccountBlocked
 		message = "Claude 账号不可用，可能被封禁或吊销"
 		retryable = false
-	case containsAny(lower, "subscription", "entitlement", "not allowed", "no active", "plan", "订阅", "权限", "无权限"):
+	case skContainsAny(lower, "subscription", "entitlement", "not allowed", "no active", "plan", "订阅", "权限", "无权限"):
 		kind = ClaudeSKConvertKindSubscription
 		message = "Claude 账号订阅或权限不可用"
 		retryable = false
@@ -345,25 +345,25 @@ func classifyClaudeSKConvertParseError(raw map[string]any, body string, cause er
 	needsCookie := false
 	userMessage := "转换站响应格式异常，没有返回 access_token / refresh_token"
 	switch {
-	case containsAny(text, "cloudflare", "cf_clearance", "captcha", "just a moment"):
+	case skContainsAny(text, "cloudflare", "cf_clearance", "captcha", "just a moment"):
 		kind = ClaudeSKConvertKindCloudflare
 		retryable = false
 		needsCookie = true
 		userMessage = "转换站 Cloudflare 校验失败"
-	case containsAny(text, "invalid cookie", "cookie invalid", "not login", "not logged", "unauthorized", "未登录", "登录过期", "cookie过期"):
+	case skContainsAny(text, "invalid cookie", "cookie invalid", "not login", "not logged", "unauthorized", "未登录", "登录过期", "cookie过期"):
 		kind = ClaudeSKConvertKindCookieInvalid
 		retryable = false
 		needsCookie = true
 		userMessage = "转换站 Cookie 无效、过期或未登录"
-	case containsAny(text, "invalid sk", "invalid sid", "sk invalid", "sid invalid", "无效sk", "sk无效", "sid无效"):
+	case skContainsAny(text, "invalid sk", "invalid sid", "sk invalid", "sid invalid", "无效sk", "sk无效", "sid无效"):
 		kind = ClaudeSKConvertKindSourceSKInvalid
 		retryable = false
 		userMessage = "原始 SK 无效或已过期"
-	case containsAny(text, "banned", "suspended", "disabled", "revoked", "deactivated", "封禁", "被封", "吊销", "停用"):
+	case skContainsAny(text, "banned", "suspended", "disabled", "revoked", "deactivated", "封禁", "被封", "吊销", "停用"):
 		kind = ClaudeSKConvertKindAccountBlocked
 		retryable = false
 		userMessage = "Claude 账号不可用，可能被封禁或吊销"
-	case containsAny(text, "subscription", "entitlement", "not allowed", "no active", "plan", "订阅", "权限", "无权限"):
+	case skContainsAny(text, "subscription", "entitlement", "not allowed", "no active", "plan", "订阅", "权限", "无权限"):
 		kind = ClaudeSKConvertKindSubscription
 		retryable = false
 		userMessage = "Claude 账号订阅或权限不可用"
@@ -519,7 +519,7 @@ func coerceStringSlice(value any) []string {
 	}
 }
 
-func containsAny(value string, needles ...string) bool {
+func skContainsAny(value string, needles ...string) bool {
 	for _, needle := range needles {
 		if strings.Contains(value, needle) {
 			return true

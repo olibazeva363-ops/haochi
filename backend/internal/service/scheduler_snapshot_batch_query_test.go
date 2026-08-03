@@ -60,10 +60,6 @@ func (r *batchAccountQueryRepo) ListModelAvailabilityCandidates(context.Context,
 	panic("unexpected ListModelAvailabilityCandidates call")
 }
 
-func (r *batchAccountQueryRepo) ListRateLimitedAccountsForProbe(context.Context, []string, time.Duration, int) ([]Account, error) {
-	panic("unexpected ListRateLimitedAccountsForProbe call")
-}
-
 func (r *batchAccountQueryRepo) ListSchedulableByPlatform(_ context.Context, platform string) ([]Account, error) {
 	return r.run(batchAccountQueryKey{platform: platform})
 }

@@ -15,25 +15,15 @@ import (
 
 type rateLimit429AccountRepoStub struct {
 	mockAccountRepoForGemini
-	rateLimitCalls          int
-	lastRateLimitID         int64
-	lastRateLimitReset      time.Time
-	modelRateLimitCalls     int
-	lastModelRateLimitScope string
-	lastModelRateLimitReset time.Time
+	rateLimitCalls     int
+	lastRateLimitID    int64
+	lastRateLimitReset time.Time
 }
 
 func (r *rateLimit429AccountRepoStub) SetRateLimited(_ context.Context, id int64, resetAt time.Time) error {
 	r.rateLimitCalls++
 	r.lastRateLimitID = id
 	r.lastRateLimitReset = resetAt
-	return nil
-}
-
-func (r *rateLimit429AccountRepoStub) SetModelRateLimit(_ context.Context, _ int64, scope string, resetAt time.Time, _ ...string) error {
-	r.modelRateLimitCalls++
-	r.lastModelRateLimitScope = scope
-	r.lastModelRateLimitReset = resetAt
 	return nil
 }
 
@@ -107,7 +97,8 @@ func TestHandle429_FallbackDisabledSkipsLocalMark(t *testing.T) {
 	require.Zero(t, accountRepo.rateLimitCalls)
 }
 
-// Anthropic 429 without reset headers should use the configured short fallback cooldown.
+// Anthropic 无 reset 头的 429（如 Extra usage required）也应走兜底冷却，
+// 否则账号永不冷却，调度器会让每个请求反复撞同一批 429 账号（旋转木马）。
 func TestHandle429_AnthropicNoResetTimeUsesFallbackCooldown(t *testing.T) {
 	accountRepo := &rateLimit429AccountRepoStub{}
 	settingRepo := newMockSettingRepo()
@@ -128,7 +119,7 @@ func TestHandle429_AnthropicNoResetTimeUsesFallbackCooldown(t *testing.T) {
 	require.True(t, !accountRepo.lastRateLimitReset.Before(before.Add(12*time.Second)) && !accountRepo.lastRateLimitReset.After(after.Add(12*time.Second)))
 }
 
-// Disabling fallback cooldown leaves Anthropic no-reset 429 unmarked.
+// 管理端关闭兜底冷却时，Anthropic 无 reset 头的 429 保持旧行为：不标记账号。
 func TestHandle429_AnthropicNoResetTimeFallbackDisabledSkipsMark(t *testing.T) {
 	accountRepo := &rateLimit429AccountRepoStub{}
 	settingRepo := newMockSettingRepo()
@@ -143,21 +134,6 @@ func TestHandle429_AnthropicNoResetTimeFallbackDisabledSkipsMark(t *testing.T) {
 	svc.handle429(context.Background(), account, http.Header{}, []byte(`{"error":{"type":"rate_limit_error","message":"Extra usage required"}}`))
 
 	require.Zero(t, accountRepo.rateLimitCalls)
-}
-
-func TestHandleUpstreamError_AnthropicFableCreditsRequiredMarksOnlyFableModel(t *testing.T) {
-	accountRepo := &rateLimit429AccountRepoStub{}
-	svc := NewRateLimitService(accountRepo, nil, &config.Config{}, nil, nil)
-	account := &Account{ID: 47, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
-	body := []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for this model.","details":{"error_code":"credits_required","disabled_reason":"out_of_credits","model":"claude-fable-5"}}}`)
-
-	shouldDisable := svc.HandleUpstreamError(context.Background(), account, http.StatusTooManyRequests, http.Header{}, body, "claude-fable-5")
-
-	require.False(t, shouldDisable)
-	require.Zero(t, accountRepo.rateLimitCalls, "Fable credits exhaustion must not mark the whole Anthropic account rate limited")
-	require.Equal(t, 1, accountRepo.modelRateLimitCalls)
-	require.Equal(t, anthropicFableRateLimitKey, accountRepo.lastModelRateLimitScope)
-	require.True(t, accountRepo.lastModelRateLimitReset.After(time.Now().Add(6*24*time.Hour)))
 }
 
 func TestHandle429_FallbackUsesDefaultSecondsWhenSettingServiceMissing(t *testing.T) {

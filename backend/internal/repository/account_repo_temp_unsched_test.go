@@ -263,26 +263,22 @@ func TestAccountRepository_ListOAuthRefreshCandidatePage_SQLFilter(t *testing.T)
 	repo := newAccountRepositoryWithSQL(nil, captureQuerySQL{db: db, captured: &capturedSQL, args: &capturedArgs}, nil)
 
 	page, err := repo.ListOAuthRefreshCandidatePage(context.Background(), service.OAuthRefreshPageOptions{
-		Platforms:               []string{service.PlatformAnthropic, service.PlatformOpenAI, service.PlatformGemini, service.PlatformAntigravity, service.PlatformGrok},
-		AfterID:                 100,
-		Limit:                   200,
-		ActiveOnly:              true,
-		IncludeRecoverableError: true,
-		IncludeSetupToken:       true,
-		RequireRefreshToken:     true,
-		ExcludeRetryCooldown:    true,
+		Platforms:            []string{service.PlatformAnthropic, service.PlatformOpenAI, service.PlatformGemini, service.PlatformAntigravity, service.PlatformGrok},
+		AfterID:              100,
+		Limit:                200,
+		ActiveOnly:           true,
+		IncludeSetupToken:    true,
+		RequireRefreshToken:  true,
+		ExcludeRetryCooldown: true,
 	})
 	require.NoError(t, err)
 	require.Empty(t, page.Accounts)
 
 	normalized := normalizeSQLWhitespace(capturedSQL)
 	require.Contains(t, normalized, "deleted_at IS NULL")
+	require.Contains(t, normalized, "schedulable = TRUE",
+		"permanently unschedulable accounts must not remain OAuth refresh candidates")
 	require.Contains(t, normalized, "status = 'active'")
-	require.Contains(t, normalized, "status = 'error'")
-	require.Contains(t, normalized, "platform = 'anthropic'")
-	require.Contains(t, normalized, "extra->>'source' = 'sk_import'")
-	require.Contains(t, normalized, "credentials ? 'sk_cookie'")
-	require.Contains(t, normalized, "btrim(credentials->>'sk_cookie') <> ''")
 	// setup-token 的 access_token 同为 8h 短期令牌，必须与 oauth 一起纳入后台刷新候选
 	require.Contains(t, normalized, "type IN ('oauth', 'setup-token')")
 	require.Contains(t, normalized, "platform = ANY($1)")
@@ -290,7 +286,6 @@ func TestAccountRepository_ListOAuthRefreshCandidatePage_SQLFilter(t *testing.T)
 		"candidate platforms must come from the refresher registry instead of a second hard-coded list")
 	require.Contains(t, normalized, "credentials ? 'refresh_token'")
 	require.Contains(t, normalized, "btrim(credentials->>'refresh_token') <> ''")
-	require.Contains(t, normalized, "OR ( platform = 'anthropic' AND type = 'oauth' AND extra->>'source' = 'sk_import' AND credentials ? 'sk_cookie'")
 	require.Contains(t, normalized, "temp_unschedulable_until > NOW()")
 	require.Contains(t, normalized, "temp_unschedulable_reason LIKE 'token refresh retry exhausted:%'")
 	require.Contains(t, normalized, "IS NOT TRUE",

@@ -89,7 +89,8 @@ func TestHandleUpstreamError_AnthropicWindowLimitPreemptsTempUnschedRule(t *test
 	require.Equal(t, resetAt, repo.lastRateLimitReset)
 }
 
-// fable429Headers builds headers for a Fable-only 7d_oi limit.
+// fable429Headers 构造 7d_oi（Fable 专属 7d 窗口）触发 429 的完整响应头，
+// 数值取自真实抓包（5h/7d 均 allowed，仅 7d_oi rejected）。
 func fable429Headers(reset5h, resetOI time.Time) http.Header {
 	headers := http.Header{}
 	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(reset5h.Unix(), 10))
@@ -148,8 +149,11 @@ func TestHandleUpstreamError_Anthropic7dOiOnlyMarksModelRateLimit(t *testing.T) 
 	require.Zero(t, repo.rateLimitCalls, "7d_oi (Fable-only) window must not mark the whole account rate limited")
 	require.Zero(t, repo.tempUnschedCalls, "7d_oi window must not trigger local temp-unsched rules")
 	require.Zero(t, repo.sessionWindowCalls, "7d_oi window must not rewrite the 5h session window as rejected")
-	require.Zero(t, repo.modelRateLimitCalls, "7d_oi（包含额度）耗尽后由 overage 承载，不再冷却 Fable；Fable 停用交由 credits_required 处理")
+	require.Equal(t, 1, repo.modelRateLimitCalls)
+	require.Equal(t, anthropicFableRateLimitKey, repo.lastModelRateLimitScope)
+	require.Equal(t, resetOI, repo.lastModelRateLimitReset)
 
+	// 429 响应头也要被动采样，避免 7d F 进度条在限流期内冻结在旧值
 	require.NotNil(t, repo.lastExtraUpdates)
 	require.Equal(t, 1.0, repo.lastExtraUpdates["passive_usage_7d_oi_utilization"])
 	require.Equal(t, resetOI.Unix(), repo.lastExtraUpdates["passive_usage_7d_oi_reset"])
@@ -157,6 +161,7 @@ func TestHandleUpstreamError_Anthropic7dOiOnlyMarksModelRateLimit(t *testing.T) 
 }
 
 func TestHandleUpstreamError_Anthropic5hWindowStillWinsOver7dOi(t *testing.T) {
+	// 5h 窗口 rejected 时必须仍按账号级限流处理（用 5h reset），同时记录 Fable 模型限流。
 	now := time.Now()
 	reset5h := now.Add(2 * time.Hour).Truncate(time.Second)
 	resetOI := now.Add(80 * time.Hour).Truncate(time.Second)
@@ -172,10 +177,12 @@ func TestHandleUpstreamError_Anthropic5hWindowStillWinsOver7dOi(t *testing.T) {
 
 	require.Equal(t, 1, repo.rateLimitCalls, "exhausted 5h window must still rate limit the account")
 	require.Equal(t, reset5h, repo.lastRateLimitReset)
-	require.Zero(t, repo.modelRateLimitCalls, "Fable 不再因 7d_oi 冷却；此处只应有真实 5h 账号级限流")
+	require.Equal(t, 1, repo.modelRateLimitCalls)
+	require.Equal(t, anthropicFableRateLimitKey, repo.lastModelRateLimitScope)
 }
 
 func TestHandleUpstreamError_AnthropicAccountWindowStillWinsOver7dOi(t *testing.T) {
+	// 7d 窗口真超限时必须仍按账号级限流处理，同时记录 Fable 模型限流。
 	now := time.Now()
 	reset5h := now.Add(2 * time.Hour).Truncate(time.Second)
 	resetOI := now.Add(80 * time.Hour).Truncate(time.Second)
@@ -191,10 +198,12 @@ func TestHandleUpstreamError_AnthropicAccountWindowStillWinsOver7dOi(t *testing.
 
 	require.Equal(t, 1, repo.rateLimitCalls, "exhausted 7d window must still rate limit the account")
 	require.Equal(t, resetOI, repo.lastRateLimitReset)
-	require.Zero(t, repo.modelRateLimitCalls, "Fable 不再因 7d_oi 冷却；此处只应有真实 7d 账号级限流")
+	require.Equal(t, 1, repo.modelRateLimitCalls, "Fable model rate limit should also be recorded")
+	require.Equal(t, anthropicFableRateLimitKey, repo.lastModelRateLimitScope)
 }
 
-func TestHandleUpstreamError_Anthropic429WithoutExhaustedWindowDoesNotRateLimit(t *testing.T) {
+func TestHandleUpstreamError_Anthropic429Without7dOiKeepsLegacyBehavior(t *testing.T) {
+	// 无 7d_oi 头、5h/7d 均未超限的 429：保持旧行为（按较早 reset 标记账号限流）。
 	now := time.Now()
 	reset5h := now.Add(2 * time.Hour).Truncate(time.Second)
 	reset7d := now.Add(80 * time.Hour).Truncate(time.Second)
@@ -213,7 +222,8 @@ func TestHandleUpstreamError_Anthropic429WithoutExhaustedWindowDoesNotRateLimit(
 
 	svc.HandleUpstreamError(context.Background(), account, http.StatusTooManyRequests, headers, nil, "claude-fable-5")
 
-	require.Zero(t, repo.rateLimitCalls, "non-exhausted Anthropic windows must not mark the account rate limited")
-	require.Zero(t, repo.sessionWindowCalls, "non-exhausted Anthropic windows must not rewrite the session window")
-	require.Zero(t, repo.modelRateLimitCalls, "non-exhausted Anthropic windows must not mark model rate limits")
+	require.Zero(t, repo.modelRateLimitCalls, "no 7d_oi signal → no model rate limit")
+	require.Equal(t, 1, repo.rateLimitCalls)
+	require.Equal(t, reset5h, repo.lastRateLimitReset, "legacy path picks the sooner reset")
+	require.Equal(t, 1, repo.sessionWindowCalls)
 }

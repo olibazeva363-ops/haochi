@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -206,35 +205,12 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 	// otherwise a broad "rate limit" keyword rule can shorten a multi-hour
 	// cooldown to a local temporary pause.
 	if statusCode == http.StatusTooManyRequests && account.Platform == PlatformAnthropic {
-		// 优先解析 claude.ai 风格 429：限流窗口在响应体 error.message 内嵌 JSON 的
-		// windows.{5h,7d,7d_oi} 中（status=exceeded_limit），而非标准 API 的
-		// anthropic-ratelimit-unified-* 响应头。5h/7d 耗尽 → 账号级；仅 7d_oi(Fable)
-		// 耗尽 → 模型级。这类响应不带标准头，是之前反复 429 不入限流的根因。
-		if s.persistAnthropicBodyRateLimit(ctx, account, responseBody) {
-			return false
-		}
-		if s.persistAnthropicFableCreditsRequired(ctx, account, headers, responseBody, firstRequestedModel(requestedModel)) {
-			return false
-		}
 		// 7d_oi 是 Fable 模型专属的 7d 窗口：只标记模型级限流，账号对其他模型仍可调度。
 		fableLimited := s.persistAnthropicFableWindowLimit(ctx, account, headers)
 		if s.persistAnthropicExhaustedWindowLimit(ctx, account, headers) {
 			return false
 		}
 		if fableLimited {
-			return false
-		}
-		// 兜底：纯 rate_limit_error（无窗口明细，如 "Rate limited. Please try again later."）
-		// 也要短暂冷却，避免账号未被标记而被反复选中造成 429 风暴。
-		// 模型感知：能走到这里说明前面没有任何账号级 5h/7d 窗口信号。若本次请求的是
-		// Fable（独立配额道），把这条裸 429 归因为 Fable 模型级短冷却，避免仅 Fable 被限
-		// 却把整个账号(含 Opus/Sonnet)误拖入账号级限流池 90s。非 Fable 请求维持账号级兜底。
-		if isAnthropicRateLimitErrorBody(responseBody) {
-			if isAnthropicFableModel(firstRequestedModel(requestedModel)) {
-				s.setFableModelRateLimit(ctx, account, time.Now().Add(anthropicPlainRateLimitCooldown), "anthropic_plain_rate_limit_fable")
-			} else {
-				s.applyAnthropicPlainRateLimitCooldown(ctx, account)
-			}
 			return false
 		}
 	}
@@ -996,14 +972,6 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 		return
 	}
 
-	if account.Platform == PlatformAnthropic {
-		slog.Info("anthropic_429_not_rate_limited",
-			"account_id", account.ID,
-			"reason", "no exhausted 5h/7d window detected",
-		)
-		return
-	}
-
 	// 3. 尝试从响应头解析重置时间（Anthropic 聚合头，向后兼容）
 	resetTimestamp := headers.Get("anthropic-ratelimit-unified-reset")
 
@@ -1281,9 +1249,6 @@ func (s *RateLimitService) persistAnthropicExhaustedWindowLimit(ctx context.Cont
 	}
 
 	s.notifyAccountSchedulingBlocked(account, limit.resetAt, limit.reason)
-	// 反应式(429头)命中即记为无 overage 到窗口 reset；主动调用方已用 overageKnownUnavailable
-	// 门控，故此处刷新是幂等的。
-	s.markOverageUnavailable(ctx, account, limit.resetAt)
 	if err := s.accountRepo.SetRateLimited(ctx, account.ID, limit.resetAt); err != nil {
 		slog.Warn("anthropic_window_rate_limit_set_failed",
 			"account_id", account.ID,
@@ -1301,222 +1266,6 @@ func (s *RateLimitService) persistAnthropicExhaustedWindowLimit(ctx context.Cont
 }
 
 const anthropicFableWindowReason = "anthropic_7d_oi_window_exhausted"
-const anthropicFableCreditsRequiredReason = "anthropic_fable_credits_required"
-const anthropicFableCreditsRequiredCooldown = 7 * 24 * time.Hour
-
-// claude.ai 风格 429：无 resetsAt 时的兜底冷却。
-const anthropicBodyCreditsCooldown = 30 * time.Minute
-
-// 无窗口明细的普通 rate_limit_error：短账号级冷却，止 churn 又不长时间误封。
-const anthropicPlainRateLimitCooldown = 90 * time.Second
-
-// anthropicBodyMessageJSON 从上游 429 响应体取出 error.message（claude.ai 会把
-// 限流明细 JSON 或纯文本塞在这里），回退顶层 message。
-func anthropicBodyMessageJSON(body []byte) string {
-	if len(body) == 0 {
-		return ""
-	}
-	msg := strings.TrimSpace(gjson.GetBytes(body, "error.message").String())
-	if msg == "" {
-		msg = strings.TrimSpace(gjson.GetBytes(body, "message").String())
-	}
-	return msg
-}
-
-// parseAnthropic429BodyResetTime 从 claude.ai 风格 429 响应体的 error.message 内嵌 JSON
-// 中取出顶层 resetsAt（Unix 秒/毫秒）并返回对应时间；无法解析时返回 nil。
-// 供 persistAnthropicBodyRateLimit 复用，调用方自行做时间合理性校验。
-func parseAnthropic429BodyResetTime(body []byte) *time.Time {
-	msg := anthropicBodyMessageJSON(body)
-	if msg == "" || !strings.HasPrefix(msg, "{") {
-		return nil
-	}
-	ra := gjson.Parse(msg).Get("resetsAt").Int()
-	if ra <= 0 {
-		return nil
-	}
-	if ra > 1e11 {
-		ra = ra / 1000
-	}
-	t := time.Unix(ra, 0).UTC()
-	return &t
-}
-
-// anthropicOverageUnavailableReason 从 claude.ai 风格 429 响应体中提取 overageDisabledReason，
-// 当其表示「无 overage 积分兜底」(out_of_credits / org_level_disabled[_until]) 时返回该原因，
-// 否则返回空串。能收到带此原因的 5h/7d 429，即说明该账号的 overage 未能承载本次请求——
-// 这是判断「账号确实没有积分可用」的权威信号，供 overage 感知的主动预剔除使用。
-func anthropicOverageUnavailableReason(body []byte) string {
-	msg := anthropicBodyMessageJSON(body)
-	if msg == "" || !strings.HasPrefix(msg, "{") {
-		return ""
-	}
-	reason := strings.ToLower(strings.TrimSpace(gjson.Parse(msg).Get("overageDisabledReason").String()))
-	switch reason {
-	case "out_of_credits", "org_level_disabled", "org_level_disabled_until":
-		return reason
-	default:
-		return ""
-	}
-}
-
-// setFableModelRateLimit 仅对 Fable 模型施加限流（账号其他模型仍可调度）。
-func (s *RateLimitService) setFableModelRateLimit(ctx context.Context, account *Account, reset time.Time, reason string) {
-	if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, anthropicFableRateLimitKey, reset, reason); err != nil {
-		slog.Warn("anthropic_body_fable_rate_limit_set_failed", "account_id", account.ID, "reason", reason, "error", err)
-		return
-	}
-	slog.Info("anthropic_body_fable_rate_limited",
-		"account_id", account.ID, "scope", anthropicFableRateLimitKey,
-		"reason", reason, "reset_at", reset, "reset_in", time.Until(reset).Truncate(time.Second))
-}
-
-// persistAnthropicBodyRateLimit 解析 claude.ai 风格 429 的响应体并精确限流。
-// 真实 error.message 形如：
-//
-//	{"type":"exceeded_limit","resetsAt":<unix>,"representativeClaim":"five_hour|seven_day|seven_day_overage_included","perModelLimit":bool,"overageDisabledReason":"out_of_credits"}
-//
-// 或纯文本 "Usage credits are required for this model."。
-// five_hour / seven_day（账号级窗口）→ SetRateLimited 整账号冷却到 resetsAt；
-// seven_day_overage_included / perModelLimit / 需要积分 → 仅 Fable 模型级冷却。
-// 命中返回 true（调用方不得 fall-through，否则 handle429 空返回会导致反复调度撞 429）。
-func (s *RateLimitService) persistAnthropicBodyRateLimit(ctx context.Context, account *Account, body []byte) bool {
-	if s == nil || s.accountRepo == nil || account == nil {
-		return false
-	}
-	msg := anthropicBodyMessageJSON(body)
-	if msg == "" {
-		return false
-	}
-	now := time.Now()
-
-	// 纯文本：需要积分（Fable overage 未生效 / 余额为 0）→ Fable 模型级冷却
-	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "credits are required") || strings.Contains(lower, "usage credits") {
-		s.setFableModelRateLimit(ctx, account, now.Add(anthropicBodyCreditsCooldown), "anthropic_body_credits_required")
-		return true
-	}
-
-	// JSON：exceeded_limit
-	if !strings.HasPrefix(msg, "{") {
-		return false
-	}
-	j := gjson.Parse(msg)
-	if !strings.EqualFold(j.Get("type").String(), "exceeded_limit") {
-		return false
-	}
-	claim := strings.TrimSpace(j.Get("representativeClaim").String())
-	perModel := j.Get("perModelLimit").Bool()
-
-	reset := now.Add(anthropicBodyCreditsCooldown)
-	if t := parseAnthropic429BodyResetTime(body); t != nil && t.After(now) && t.Before(now.Add(8*24*time.Hour)) {
-		reset = *t
-	}
-
-	// 5h / 7d 账号级窗口 → 整账号冷却
-	if !perModel && (claim == "five_hour" || claim == "seven_day") {
-		s.notifyAccountSchedulingBlocked(account, reset, "anthropic_body_"+claim)
-		// 能收到 5h/7d 账号级 429 = 此刻 overage 没能兜住该号；记为无 overage 到窗口 reset，
-		// 供主动剔除路径下个窗口直接排除，避免反复撞 429。
-		s.markOverageUnavailable(ctx, account, reset)
-		if err := s.accountRepo.SetRateLimited(ctx, account.ID, reset); err != nil {
-			slog.Warn("anthropic_body_account_rate_limit_set_failed", "account_id", account.ID, "claim", claim, "error", err)
-			return true
-		}
-		slog.Info("anthropic_body_account_rate_limited",
-			"account_id", account.ID, "claim", claim, "reset_at", reset,
-			"reset_in", time.Until(reset).Truncate(time.Second))
-		return true
-	}
-
-	// seven_day_overage_included / perModelLimit / 其他 → 仅 Fable 模型级冷却
-	reason := "anthropic_body_exceeded_limit"
-	if claim != "" {
-		reason = "anthropic_body_" + claim
-	}
-	s.setFableModelRateLimit(ctx, account, reset, reason)
-	return true
-}
-
-// isAnthropicRateLimitErrorBody 判断是否为无窗口明细的普通限流错误
-// （error.type=rate_limit_error 或 message 含 rate limit / try again later）。
-func isAnthropicRateLimitErrorBody(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()), "rate_limit_error") {
-		return true
-	}
-	lower := strings.ToLower(anthropicBodyMessageJSON(body))
-	return strings.Contains(lower, "rate limit") || strings.Contains(lower, "try again later")
-}
-
-// applyAnthropicPlainRateLimitCooldown 对无窗口明细的普通 429 施加短账号级冷却，
-// 避免账号未被标记而被反复调度撞 429。
-func (s *RateLimitService) applyAnthropicPlainRateLimitCooldown(ctx context.Context, account *Account) {
-	if s == nil || s.accountRepo == nil || account == nil {
-		return
-	}
-	reset := time.Now().Add(anthropicPlainRateLimitCooldown)
-	s.notifyAccountSchedulingBlocked(account, reset, "anthropic_plain_rate_limit")
-	if err := s.accountRepo.SetRateLimited(ctx, account.ID, reset); err != nil {
-		slog.Warn("anthropic_plain_rate_limit_set_failed", "account_id", account.ID, "error", err)
-		return
-	}
-	slog.Info("anthropic_plain_rate_limit_cooldown", "account_id", account.ID, "reset_at", reset)
-}
-
-func isAnthropicFableCreditsRequired(body []byte, requestedModel string) bool {
-	if len(body) == 0 {
-		return false
-	}
-	errorCode := strings.TrimSpace(gjson.GetBytes(body, "error.details.error_code").String())
-	disabledReason := strings.TrimSpace(gjson.GetBytes(body, "error.details.disabled_reason").String())
-	model := strings.TrimSpace(gjson.GetBytes(body, "error.details.model").String())
-	if model == "" {
-		model = strings.TrimSpace(requestedModel)
-	}
-	if !isAnthropicFableModel(model) {
-		return false
-	}
-	return errorCode == "credits_required" || disabledReason == "out_of_credits"
-}
-
-func (s *RateLimitService) persistAnthropicFableCreditsRequired(ctx context.Context, account *Account, headers http.Header, body []byte, requestedModel string) bool {
-	if s == nil || s.accountRepo == nil || account == nil {
-		return false
-	}
-	if !isAnthropicFableCreditsRequired(body, requestedModel) {
-		return false
-	}
-	// 恢复时间用真实的 7d_oi（Fable 专属周窗口）reset，而非固定 7 天；缺失时回退聚合 reset，
-	// 再回退默认冷却。同时被动采样响应头用量，保证前端 7d F 进度条与徽章时间准确。
-	now := time.Now()
-	resetAt, ok := parseAnthropicWindowReset(headers, "7d_oi", now)
-	if !ok {
-		if aggReset, aggOK := parseAnthropicAggregateReset(headers, now); aggOK {
-			resetAt, ok = aggReset, true
-		}
-	}
-	if !ok {
-		resetAt = now.Add(anthropicFableCreditsRequiredCooldown)
-	}
-	s.samplePassiveUsageFromHeaders(ctx, account, headers)
-	if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, anthropicFableRateLimitKey, resetAt, anthropicFableCreditsRequiredReason); err != nil {
-		slog.Warn("anthropic_fable_credits_required_rate_limit_set_failed",
-			"account_id", account.ID,
-			"scope", anthropicFableRateLimitKey,
-			"reset_at", resetAt,
-			"error", err)
-		return true
-	}
-	slog.Info("anthropic_fable_credits_required_model_rate_limited",
-		"account_id", account.ID,
-		"scope", anthropicFableRateLimitKey,
-		"reset_at", resetAt,
-		"reset_in", time.Until(resetAt).Truncate(time.Second))
-	return true
-}
 
 // selectAnthropicFableWindowLimit parses the Anthropic 7d_oi per-model window
 // headers (the Fable-only 7d window, e.g. anthropic-ratelimit-unified-7d_oi-*).
@@ -1566,12 +1315,19 @@ func (s *RateLimitService) persistAnthropicFableWindowLimit(ctx context.Context,
 	if limit == nil {
 		return false
 	}
-	// overage 已启用：7d_oi 是 Fable 的“包含额度”周窗口，耗尽后由 overage 继续承载。
-	// 因此不冷却 Fable、更不升级为账号级限流——让账号跑到真实上限（credits_required）才停。
-	// 仍被动采样响应头用量以实时刷新前端 7d F 进度；返回 true 阻止 fall-through 到 handle429，
-	// 确保 7d_oi 429 绝不误设账号级限流。Fable 真正停用由 persistAnthropicFableCreditsRequired 处理。
+	// 429 响应头本身携带最新的窗口用量（7d_oi utilization=1.0）。限流期内
+	// Fable 请求不再调度到该账号，若不在此处采样，7d F 进度条会冻结在
+	// 限流前的旧值直到窗口重置。
 	s.samplePassiveUsageFromHeaders(ctx, account, headers)
-	slog.Info("anthropic_fable_window_exhausted_overage_continues",
+	if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, anthropicFableRateLimitKey, limit.resetAt, limit.reason); err != nil {
+		slog.Warn("anthropic_fable_window_rate_limit_set_failed",
+			"account_id", account.ID,
+			"scope", anthropicFableRateLimitKey,
+			"reset_at", limit.resetAt,
+			"error", err)
+		return true
+	}
+	slog.Info("anthropic_fable_window_model_rate_limited",
 		"account_id", account.ID,
 		"scope", anthropicFableRateLimitKey,
 		"reset_at", limit.resetAt,
@@ -1632,7 +1388,8 @@ func calculateAnthropic429ResetTime(headers http.Header) *anthropic429Result {
 	case is7dExceeded:
 		chosen = reset7d
 	default:
-		return nil
+		// Neither flag clearly exceeded — pick the sooner reset as best guess
+		chosen = pickSooner(reset5h, reset7d)
 	}
 
 	if chosen == nil {
@@ -1923,31 +1680,6 @@ func (s *RateLimitService) UpdateSessionWindow(ctx context.Context, account *Acc
 			slog.Warn("rate_limit_clear_failed", "account_id", account.ID, "error", err)
 		}
 	}
-
-	// 主动剔除：成功响应的限流头若已显示 5h/7d 账号级窗口耗尽（利用率≥100% /
-	// surpassed-threshold / 5h status=rejected），提前打账号级冷却，避免已满额的号在下次撞
-	// 429 前继续被调度、白白消耗 failover 预算并向客户端报错。复用与 429 路径完全相同的检测/
-	// 持久化逻辑（selectAnthropicExhaustedWindow / persistAnthropicExhaustedWindowLimit），仅把
-	// 触发时机从「撞 429」提前到「成功响应即采样到耗尽」。reset 取自响应头真实时间，窗口重置
-	// (status=allowed)后由上方分支自动 ClearRateLimit，故不误伤、可自愈；放在清除之后，确保
-	// 5h 已重置但 7d 仍耗尽时冷却能被正确重新写入。
-	// 注意：7d_oi(Fable 专属周窗)不在此处理——其耗尽由 overage 承载，Fable 真正停用只在
-	// credits_required(429) 时由既有逻辑处理，避免把仍可用 overage 的号误停。
-	// 可用 SUB2API_PASSIVE_WINDOW_COOLDOWN=0 关闭。
-	// 仅对"已确认无可用 overage"的号做主动剔除；有积分/状态未知的号留在池里，让其在 5h/7d
-	// 额度耗尽后继续用积分(overage)服务，直到真撞 out_of_credits 才由反应式路径记标记并剔除。
-	if passiveWindowCooldownEnabled() && overageKnownUnavailable(account) {
-		// 走到这里 = 本次是 2xx 成功响应（UpdateSessionWindow 只在成功路径调用）。
-		// 若响应头显示 5h/7d 账号级窗口已耗尽（rejected/exceeded）、我们却仍拿到成功结果，
-		// 那只可能是 overage（积分）兜住了本次请求——直接证伪了"该号无可用 overage"的旧标记。
-		// 此时清除 overage_unavailable_until，让号留在调度池继续用积分服务，而不是把一个正在
-		// 正常出结果的号重新打入账号级冷却（否则半开重探放行→成功→又被此处剔除，形成 thrash）。
-		// 真正无 overage 的号在窗口耗尽后只会撞 429、走不到这条成功路径，由反应式 429 路径
-		// （HandleUpstreamError）重新记标记并剔除，故自愈、不误伤。
-		if selectAnthropicExhaustedWindow(headers, time.Now()) != nil {
-			s.clearOverageUnavailable(ctx, account)
-		}
-	}
 }
 
 // samplePassiveUsageFromHeaders 从 Anthropic 响应头收集 5h/7d/7d_oi 的
@@ -1996,78 +1728,6 @@ func (s *RateLimitService) samplePassiveUsageFromHeaders(ctx context.Context, ac
 			slog.Warn("passive_usage_update_failed", "account_id", account.ID, "error", err)
 		}
 	}
-}
-
-// passiveWindowCooldownEnabled 控制「成功响应即根据限流头主动剔除已耗尽窗口账号」的开关。
-// 默认开启；仅当 SUB2API_PASSIVE_WINDOW_COOLDOWN 显式设为 0/false/off/no 时关闭，
-// 便于线上出问题时改 env 重启即可回退，无需回滚代码。
-func passiveWindowCooldownEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("SUB2API_PASSIVE_WINDOW_COOLDOWN"))) {
-	case "0", "false", "off", "no":
-		return false
-	default:
-		return true
-	}
-}
-
-// overageUnavailableExtraKey 记录"该号当前窗口内已确认没有可用 overage(积分)"的到期时间(unix秒)。
-// 由真实的 5h/7d 429 写入(能 429 就说明 overage 没兜住)，有效期到该窗口 reset。
-const overageUnavailableExtraKey = "overage_unavailable_until"
-
-// overageKnownUnavailable 报告是否"已确认该号当前没有可用 overage 积分"。
-// 主动剔除只对已知无 overage 的号生效；有积分或状态未知的号留在调度池里、让请求用积分续，
-// 只有真撞 429(out_of_credits/org_level_disabled)后才被记为无 overage 并剔除。
-func overageKnownUnavailable(account *Account) bool {
-	if account == nil || account.Extra == nil {
-		return false
-	}
-	v, ok := account.Extra[overageUnavailableExtraKey]
-	if !ok {
-		return false
-	}
-	ts := int64(parseExtraFloat64(v))
-	if ts <= 0 {
-		return false
-	}
-	return time.Now().Before(time.Unix(ts, 0))
-}
-
-// markOverageUnavailable 在真实窗口 429 后记录"该号 overage 不可用"，有效期到窗口 reset。
-// 使下个窗口/后续采样可直接主动剔除该号，避免反复撞 429；窗口重置后标记自然过期，
-// 若届时用户已充值/开通 overage，则该号会被重新放行试用积分(不再命中此标记)。
-func (s *RateLimitService) markOverageUnavailable(ctx context.Context, account *Account, until time.Time) {
-	if s == nil || s.accountRepo == nil || account == nil || !until.After(time.Now()) {
-		return
-	}
-	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{overageUnavailableExtraKey: until.Unix()}); err != nil {
-		slog.Warn("overage_unavailable_mark_failed", "account_id", account.ID, "error", err)
-		return
-	}
-	if account.Extra == nil {
-		account.Extra = map[string]any{}
-	}
-	account.Extra[overageUnavailableExtraKey] = until.Unix()
-}
-
-// clearOverageUnavailable 清除"该号无可用 overage(积分)"标记（overage_unavailable_until）。
-// 仅当一次 2xx 成功响应在基础 5h/7d 窗口已耗尽的情况下仍被交付时调用——成功即证明 overage
-// 可用，证伪了旧标记。与 markOverageUnavailable 对称：写库置空的同时同步 account.Extra 内存态，
-// 使本次调用之后的 overageKnownUnavailable 立即返回 false。
-func (s *RateLimitService) clearOverageUnavailable(ctx context.Context, account *Account) {
-	if s == nil || s.accountRepo == nil || account == nil {
-		return
-	}
-	if !overageKnownUnavailable(account) {
-		return
-	}
-	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{overageUnavailableExtraKey: nil}); err != nil {
-		slog.Warn("overage_unavailable_clear_failed", "account_id", account.ID, "error", err)
-		return
-	}
-	if account.Extra != nil {
-		delete(account.Extra, overageUnavailableExtraKey)
-	}
-	slog.Info("overage_unavailable_cleared", "account_id", account.ID, "reason", "success_via_overage")
 }
 
 // ClearRateLimit 清除账号的限流状态

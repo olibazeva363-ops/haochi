@@ -356,14 +356,6 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 				"error", updateErr,
 			)
 			return nil, fmt.Errorf("%w: %v", errOAuthRefreshCredentialPersist, updateErr)
-		} else if durableAccount, readErr := api.accountRepo.GetByID(ctx, freshAccount.ID); readErr == nil && durableAccount != nil {
-			freshAccount = durableAccount
-		} else if readErr != nil {
-			slog.Warn("oauth_refresh_post_persist_reread_failed",
-				"account_id", freshAccount.ID,
-				"platform", freshAccount.Platform,
-				"error", readErr,
-			)
 		}
 	}
 

@@ -218,10 +218,6 @@ func (r *fullRebuildAccountRepo) ListModelAvailabilityCandidates(context.Context
 	panic("unexpected ListModelAvailabilityCandidates call")
 }
 
-func (r *fullRebuildAccountRepo) ListRateLimitedAccountsForProbe(context.Context, []string, time.Duration, int) ([]Account, error) {
-	panic("unexpected ListRateLimitedAccountsForProbe call")
-}
-
 func (r *fullRebuildAccountRepo) ListSchedulableByPlatform(_ context.Context, platform string) ([]Account, error) {
 	return r.record(0, platform)
 }

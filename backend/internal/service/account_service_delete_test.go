@@ -163,10 +163,6 @@ func (s *accountRepoStub) ListModelAvailabilityCandidates(ctx context.Context, g
 	panic("unexpected ListModelAvailabilityCandidates call")
 }
 
-func (s *accountRepoStub) ListRateLimitedAccountsForProbe(ctx context.Context, platforms []string, minCooldownRemaining time.Duration, limit int) ([]Account, error) {
-	panic("unexpected ListRateLimitedAccountsForProbe call")
-}
-
 func (s *accountRepoStub) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {
 	panic("unexpected SetRateLimited call")
 }

@@ -71,7 +71,6 @@ func TestDefaultBedrockModelMapping_ContainsNewClaudeModels(t *testing.T) {
 	cases := map[string]string{
 		"claude-fable-5":  "anthropic.claude-fable-5",
 		"claude-opus-4-8": "us.anthropic.claude-opus-4-8-v1",
-		"claude-opus-5":   "us.anthropic.claude-opus-5-v1",
 	}
 	for from, want := range cases {
 		got, ok := DefaultBedrockModelMapping[from]

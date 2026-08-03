@@ -88,7 +88,7 @@ func TestCalculateAnthropic429ResetTime_UtilizationExactlyOne(t *testing.T) {
 	assertAnthropicResult(t, result, 1770998400)
 }
 
-func TestCalculateAnthropic429ResetTime_NeitherExceeded_ReturnsNil(t *testing.T) {
+func TestCalculateAnthropic429ResetTime_NeitherExceeded_UsesShorter(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.95")
 	headers.Set("anthropic-ratelimit-unified-5h-reset", "1770998400") // sooner
@@ -96,9 +96,7 @@ func TestCalculateAnthropic429ResetTime_NeitherExceeded_ReturnsNil(t *testing.T)
 	headers.Set("anthropic-ratelimit-unified-7d-reset", "1771549200") // later
 
 	result := calculateAnthropic429ResetTime(headers)
-	if result != nil {
-		t.Fatalf("expected nil result when neither window is exhausted, got resetAt=%v", result.resetAt)
-	}
+	assertAnthropicResult(t, result, 1770998400)
 }
 
 func TestCalculateAnthropic429ResetTime_Only5hResetHeader(t *testing.T) {

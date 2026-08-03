@@ -170,6 +170,17 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		clientUserAgent = c.GetHeader("User-Agent")
 	}
 	isClaudeCode := IsClaudeCodeClient(ctx) || isClaudeCodeClient(clientUserAgent, parsed.MetadataUserID)
+
+	// 补充判定：上游 API 网关（如 new-api）转发真实 Claude Code 流量时，
+	// UA 会变成 Go-http-client 但 body 保留了完整的 Claude Code 特征
+	// （billing attribution block + metadata.user_id）。此时如果仍走 mimicry
+	// 重写 system prompt，会破坏 Anthropic prompt cache 的前缀匹配——
+	// 导致 messages 级缓存永远 miss、cache_creation 每轮全量重写。
+	// 通过检查 body 中的 billing attribution block 来识别被代理的真实 CC 流量。
+	if !isClaudeCode && parsed.MetadataUserID != "" {
+		isClaudeCode = systemHasBillingAttributionBlock(body)
+	}
+
 	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCode
 
 	if shouldMimicClaudeCode {
@@ -352,7 +363,6 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	var resp *http.Response
 	lastWireBody := body
 	retryStart := time.Now()
-	sk401Recovered := false
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
 		// 构建上游请求（每次重试需要重新构建，因为请求体需要重新读取）
 		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)
@@ -369,6 +379,10 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		if err != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
+			}
+			// Transport attempt left local validation; count Ollama Cloud activity.
+			if !errors.Is(err, context.Canceled) {
+				scheduleOllamaCloudUsageActivity(s.deferredService, account)
 			}
 			// Ensure the client receives an error response (handlers assume Forward writes on non-failover errors).
 			safeErr := sanitizeUpstreamErrorMessage(err.Error())
@@ -390,33 +404,6 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				},
 			})
 			return nil, fmt.Errorf("upstream request failed: %s", safeErr)
-		}
-
-		if resp.StatusCode == http.StatusUnauthorized && !sk401Recovered && IsClaudeSKImportAccount(account) {
-			respBody, readErr := s.readUpstreamErrorBody(resp)
-			if readErr == nil {
-				_ = resp.Body.Close()
-				if recoveredToken, recoveredCredentials, recoverErr := s.recoverClaudeSKImportTokenOn401(ctx, account, respBody); recoverErr == nil {
-					sk401Recovered = true
-					token = recoveredToken
-					account.Credentials = recoveredCredentials
-					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-						Platform:           account.Platform,
-						AccountID:          account.ID,
-						AccountName:        account.Name,
-						UpstreamStatusCode: resp.StatusCode,
-						UpstreamRequestID:  resp.Header.Get("x-request-id"),
-						UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
-						Kind:               "sk_import_401_recovered",
-						Message:            extractUpstreamErrorMessage(respBody),
-					})
-					logger.LegacyPrintf("service.gateway", "Account %d: SK import token recovered after upstream 401, retrying current request", account.ID)
-					continue
-				} else {
-					logger.LegacyPrintf("service.gateway", "Account %d: SK import token recovery after upstream 401 failed: %v", account.ID, recoverErr)
-				}
-				resp.Body = io.NopCloser(bytes.NewReader(respBody))
-			}
 		}
 
 		// 优先检测thinking block签名错误（400）并重试一次
@@ -855,6 +842,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 					StatusCode:   403,
 					ResponseBody: body,
 				}
+			}
+			// 流中断（缺失 terminal 事件、读错误、数据间隔超时等）时保留已观测到的
+			// usage 与错误一起返回，handler 在错误处理完成后照常提交 usage 记录。
+			if partial := partialStreamUsageResult(resp, streamResult, originalModel, mappedModel, startTime, err); partial != nil {
+				return partial, err
 			}
 			return nil, err
 		}
