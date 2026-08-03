@@ -244,3 +244,131 @@ func TestGetOpenAICodexCanonicalUserAgentBuildsFromVersion(t *testing.T) {
 		svc.GetOpenAICodexCanonicalUserAgent(context.Background()),
 	)
 }
+
+// 回归：面板完整 UA 是唯一能改 OS / 架构 / 终端指纹的地方，必须保留；但它填写于某个
+// 历史版本，逐字沿用会绕过版本自动同步、把出站身份永久钉死在陈旧版本上——而陈旧身份
+// 正是上游优先降载的那一侧。因此只借它的指纹，版本段一律用生效版本重建。
+func TestGetOpenAICodexCanonicalUserAgentRebuildsPanelUAVersion(t *testing.T) {
+	t.Run("陈旧面板 UA 跟随生效版本", func(t *testing.T) {
+		svc := NewSettingService(&codexVersionSettingRepoStub{values: map[string]string{
+			// 历史面板 placeholder 的原文，照抄填写过的存量部署就是这个值。
+			SettingKeyOpenAICodexUserAgent:           "codex_cli_rs/0.144.1 (Ubuntu 22.4.0; x86_64) xterm-256color",
+			SettingKeyOpenAICodexClientVersionSynced: "0.200.1",
+		}}, nil)
+
+		require.Equal(t,
+			"codex_cli_rs/0.200.1 (Ubuntu 22.4.0; x86_64) xterm-256color",
+			svc.GetOpenAICodexCanonicalUserAgent(context.Background()),
+		)
+	})
+
+	t.Run("自定义指纹原样保留", func(t *testing.T) {
+		svc := NewSettingService(&codexVersionSettingRepoStub{values: map[string]string{
+			SettingKeyOpenAICodexUserAgent:           "codex_cli_rs/0.140.0 (Mac OS X 15.1.0; arm64) iTerm.app",
+			SettingKeyOpenAICodexClientVersionSynced: "0.200.1",
+		}}, nil)
+
+		require.Equal(t,
+			"codex_cli_rs/0.200.1 (Mac OS X 15.1.0; arm64) iTerm.app",
+			svc.GetOpenAICodexCanonicalUserAgent(context.Background()),
+		)
+	})
+
+	// 面板版本号覆写优先级仍然高于同步值：管理员固定版本的诉求不被重建绕开。
+	t.Run("面板版本号覆写优先", func(t *testing.T) {
+		svc := NewSettingService(&codexVersionSettingRepoStub{values: map[string]string{
+			SettingKeyOpenAICodexUserAgent:           "codex_cli_rs/0.144.1 (Ubuntu 22.4.0; x86_64) xterm-256color",
+			SettingKeyOpenAICodexClientVersion:       "0.150.0",
+			SettingKeyOpenAICodexClientVersionSynced: "0.200.1",
+		}}, nil)
+
+		require.Equal(t,
+			"codex_cli_rs/0.150.0 (Ubuntu 22.4.0; x86_64) xterm-256color",
+			svc.GetOpenAICodexCanonicalUserAgent(context.Background()),
+		)
+	})
+
+	// 非 `{client}/{version}` 形态无法重建，原样返回，由收口整体回退规范身份。
+	t.Run("非 Codex 形态原样返回", func(t *testing.T) {
+		svc := NewSettingService(&codexVersionSettingRepoStub{values: map[string]string{
+			SettingKeyOpenAICodexUserAgent: "not-a-codex-client",
+		}}, nil)
+
+		require.Equal(t, "not-a-codex-client", svc.GetOpenAICodexCanonicalUserAgent(context.Background()))
+	})
+}
+
+func (r *codexVersionSyncSettingRepoStub) Get(_ context.Context, key string) (*Setting, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.getErr != nil {
+		return nil, r.getErr
+	}
+	value, ok := r.values[key]
+	if !ok {
+		return nil, ErrSettingNotFound
+	}
+	return &Setting{Key: key, Value: value, UpdatedAt: r.updatedAt}, nil
+}
+
+// 启动同步防抖：同步值仍在一个周期内时跳过，避免频繁重启/滚动发布把启动同步
+// 放大成对 GitHub 的连续请求。
+func TestOpenAICodexVersionSyncInitialSkipsWhenRecentlySynced(t *testing.T) {
+	repo := newCodexVersionSyncSettingRepoStub(map[string]string{
+		SettingKeyOpenAICodexClientVersionSynced: "0.146.0",
+	})
+	repo.updatedAt = time.Now().Add(-time.Hour)
+	github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.147.0"}}}
+
+	newCodexVersionSyncService(repo, github).runInitial()
+
+	require.Zero(t, github.calls, "同步值仍在周期内时不应请求上游")
+	require.Empty(t, repo.syncedWrites())
+}
+
+func TestOpenAICodexVersionSyncInitialRunsWhenStaleOrMissing(t *testing.T) {
+	t.Run("同步值已过期", func(t *testing.T) {
+		repo := newCodexVersionSyncSettingRepoStub(map[string]string{
+			SettingKeyOpenAICodexClientVersionSynced: "0.146.0",
+		})
+		repo.updatedAt = time.Now().Add(-7 * time.Hour)
+		github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.147.0"}}}
+
+		newCodexVersionSyncService(repo, github).runInitial()
+
+		require.Equal(t, 1, github.calls)
+		require.Equal(t, []string{"0.147.0"}, repo.syncedWrites())
+	})
+
+	// 首次部署尚无同步值：必须立刻同步，不能被防抖挡住。
+	t.Run("尚无同步值", func(t *testing.T) {
+		repo := newCodexVersionSyncSettingRepoStub(nil)
+		repo.updatedAt = time.Now()
+		github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.146.0"}}}
+
+		newCodexVersionSyncService(repo, github).runInitial()
+
+		require.Equal(t, 1, github.calls)
+		require.Equal(t, []string{"0.146.0"}, repo.syncedWrites())
+	})
+}
+
+// 版本比较必须按段取数字：字典序会把 0.99.0 判为大于 0.146.0，
+// 从而让「取最大值」和「只向前推进」两处逻辑同时判错。
+func TestCodexVersionComparisonIsNumericNotLexical(t *testing.T) {
+	require.Greater(t, CompareVersions("0.146.0", "0.99.0"), 0)
+
+	require.Equal(t, "0.146.0", latestCodexStableReleaseVersion([]*GitHubRelease{
+		{TagName: "rust-v0.99.0"},
+		{TagName: "rust-v0.146.0"},
+	}))
+
+	repo := newCodexVersionSyncSettingRepoStub(map[string]string{
+		SettingKeyOpenAICodexClientVersionSynced: "0.146.0",
+	})
+	github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.99.0"}}}
+
+	newCodexVersionSyncService(repo, github).runOnce()
+
+	require.Empty(t, repo.syncedWrites(), "0.99.0 低于已同步的 0.146.0，不得写入")
+}
