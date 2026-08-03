@@ -1,0 +1,114 @@
+# =============================================================================
+# TokenHub 服务器部署（GHCR 镜像 + Watchtower 自动更新）
+# =============================================================================
+# 用法（在服务器上）：
+#   1. cp .env.deploy.example .env  然后填好里面的密钥/密码
+#   2. docker login ghcr.io   （用户名=GitHub 用户名，密码=read:packages 的 PAT）
+#   3. docker compose -f docker-compose.ghcr.yml up -d
+#
+# 之后每次 push main → Actions 构建新 :latest → Watchtower 每 60s 检查一次，
+# 发现新镜像自动拉取并重启 app（只更新带 watchtower.enable 标签的容器）。
+# =============================================================================
+
+services:
+  app:
+    image: ${APP_IMAGE:-ghcr.io/olibazeva363-ops/haochi:latest}
+    container_name: tokenhub-app
+    restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-8080}:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - AUTO_SETUP=true
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+      - SERVER_MODE=${SERVER_MODE:-release}
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=${POSTGRES_USER:-tokenhub}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - DATABASE_DBNAME=${POSTGRES_DB:-tokenhub}
+      - DATABASE_SSLMODE=disable
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@tokenhub.local}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY:?TOTP_ENCRYPTION_KEY is required}
+      - TZ=${TZ:-Asia/Shanghai}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [tokenhub]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  postgres:
+    image: postgres:18-alpine
+    container_name: tokenhub-postgres
+    restart: unless-stopped
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-tokenhub}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - POSTGRES_DB=${POSTGRES_DB:-tokenhub}
+      - TZ=${TZ:-Asia/Shanghai}
+    networks: [tokenhub]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tokenhub} -d ${POSTGRES_DB:-tokenhub}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:8-alpine
+    container_name: tokenhub-redis
+    restart: unless-stopped
+    volumes:
+      - ./redis_data:/data
+    command: >
+      sh -c '
+        redis-server \
+        --save 60 1 \
+        --appendonly yes \
+        --appendfsync everysec \
+        ${REDIS_PASSWORD:+--requirepass "$REDIS_PASSWORD"}'
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+    networks: [tokenhub]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # 自动更新器：监视带 watchtower.enable 标签的容器，发现新镜像即拉取重启
+  watchtower:
+    image: containrrr/watchtower
+    container_name: tokenhub-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 用于拉取私有 GHCR 镜像：服务器先 `docker login ghcr.io` 生成该文件
+      - ${DOCKER_CONFIG_DIR:-~/.docker}/config.json:/config.json:ro
+    command: --interval 60 --cleanup --label-enable
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+    networks: [tokenhub]
+
+networks:
+  tokenhub:
+    driver: bridge
