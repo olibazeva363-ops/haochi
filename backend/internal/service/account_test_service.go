@@ -223,6 +223,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 // testClaudeAccountConnection tests an Anthropic Claude account's connection
 func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account *Account, modelID string) error {
 	ctx := c.Request.Context()
+	const skTestRecoveryContextKey = "claude_sk_test_recovery_attempted"
 
 	// Determine the model to use
 	testModelID := modelID
@@ -286,8 +287,10 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	}
 	payloadBytes, _ := json.Marshal(payload)
 
-	// Send test_start event
-	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+	// Send test_start event (skip on SK 401 recovery retry to avoid duplicate events)
+	if attempted, _ := c.Get(skTestRecoveryContextKey); attempted != true {
+		s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(payloadBytes))
 	if err != nil {
@@ -329,6 +332,19 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusUnauthorized && IsClaudeSKImportAccount(account) {
+			if attempted, _ := c.Get(skTestRecoveryContextKey); attempted != true {
+				c.Set(skTestRecoveryContextKey, true)
+				recoveredToken, recoverErr := s.recoverClaudeSKImportTokenForTest(ctx, account, body)
+				if recoverErr == nil {
+					account.Credentials["access_token"] = recoveredToken
+					s.sendEvent(c, TestEvent{Type: "content", Text: "SK token refreshed after 401; retrying test request"})
+					return s.testClaudeAccountConnection(c, account, modelID)
+				}
+				errMsg := fmt.Sprintf("API returned %d: %s\nSK auto-refresh failed: %s", resp.StatusCode, string(body), recoverErr.Error())
+				return s.sendErrorAndEnd(c, errMsg)
+			}
+		}
 		errMsg := fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body))
 
 		// 403 表示账号被上游封禁，标记为 error 状态

@@ -363,6 +363,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	var resp *http.Response
 	lastWireBody := body
 	retryStart := time.Now()
+	sk401Recovered := false
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
 		// 构建上游请求（每次重试需要重新构建，因为请求体需要重新读取）
 		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)
@@ -404,6 +405,33 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				},
 			})
 			return nil, fmt.Errorf("upstream request failed: %s", safeErr)
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized && !sk401Recovered && IsClaudeSKImportAccount(account) {
+			respBody, readErr := s.readUpstreamErrorBody(resp)
+			if readErr == nil {
+				_ = resp.Body.Close()
+				if recoveredToken, recoveredCredentials, recoverErr := s.recoverClaudeSKImportTokenOn401(ctx, account, respBody); recoverErr == nil {
+					sk401Recovered = true
+					token = recoveredToken
+					account.Credentials = recoveredCredentials
+					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+						Platform:           account.Platform,
+						AccountID:          account.ID,
+						AccountName:        account.Name,
+						UpstreamStatusCode: resp.StatusCode,
+						UpstreamRequestID:  resp.Header.Get("x-request-id"),
+						UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
+						Kind:               "sk_import_401_recovered",
+						Message:            extractUpstreamErrorMessage(respBody),
+					})
+					logger.LegacyPrintf("service.gateway", "Account %d: SK import token recovered after upstream 401, retrying current request", account.ID)
+					continue
+				} else {
+					logger.LegacyPrintf("service.gateway", "Account %d: SK import token recovery after upstream 401 failed: %v", account.ID, recoverErr)
+				}
+				resp.Body = io.NopCloser(bytes.NewReader(respBody))
+			}
 		}
 
 		// 优先检测thinking block签名错误（400）并重试一次
