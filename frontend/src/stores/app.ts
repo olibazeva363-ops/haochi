@@ -262,12 +262,19 @@ export const useAppStore = defineStore('app', () => {
     try {
       const data = await checkUpdatesAPI(force)
       currentVersion.value = data.current_version
-      latestVersion.value = data.latest_version
-      hasUpdate.value = data.has_update
+      // TokenHub is a customized fork. Upstream sub2api releases are not valid
+      // in-place upgrades because they would replace TokenHub-specific changes.
+      latestVersion.value = data.current_version
+      hasUpdate.value = false
       buildType.value = data.build_type || 'source'
-      releaseInfo.value = data.release_info || null
+      releaseInfo.value = null
       versionLoaded.value = true
-      return data
+      return {
+        ...data,
+        latest_version: data.current_version,
+        has_update: false,
+        release_info: undefined
+      }
     } catch (error) {
       console.error('Failed to fetch version:', error)
       return null
