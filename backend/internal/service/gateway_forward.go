@@ -33,9 +33,12 @@ const (
 )
 
 func (s *GatewayService) shouldRetryUpstreamError(account *Account, statusCode int) bool {
-	// OAuth/Setup Token 账号：仅 403 重试
+	// OAuth/Setup Token failures must not be replayed on the same credential.
+	// In particular, repeating a 403 amplifies access-denial and account-risk
+	// signals without making the request more likely to succeed. The handler may
+	// still fail over to a bounded number of other accounts when appropriate.
 	if account.IsOAuth() {
-		return statusCode == 403
+		return false
 	}
 
 	// API Key 账号：未配置的错误码重试

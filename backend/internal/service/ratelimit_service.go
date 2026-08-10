@@ -977,6 +977,23 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 
 	// 4. 如果响应头没有，尝试从响应体解析（OpenAI usage_limit_reached, Gemini）
 	if resetTimestamp == "" {
+		// Anthropic may return the standard Retry-After header without its
+		// proprietary unified reset headers. Respect it before using the short
+		// local fallback so the scheduler does not repeatedly hit the same limit.
+		if account.Platform == PlatformAnthropic {
+			now := time.Now()
+			if resetAt := parseRetryAfterResetTime(headers, now); resetAt != nil &&
+				resetAt.After(now) && !resetAt.After(now.Add(8*24*time.Hour)) {
+				s.notifyAccountSchedulingBlocked(account, *resetAt, "429_retry_after")
+				if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
+					slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
+					return
+				}
+				slog.Info("anthropic_retry_after_rate_limited", "account_id", account.ID, "reset_at", *resetAt, "reset_in", time.Until(*resetAt).Truncate(time.Second))
+				return
+			}
+		}
+
 		switch account.Platform {
 		case PlatformOpenAI:
 			// 尝试解析 OpenAI 的 usage_limit_reached 错误

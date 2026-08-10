@@ -3,6 +3,8 @@ package handler
 
 import (
 	"context"
+	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +62,31 @@ type UpdateAPIKeyRequest struct {
 	RateLimit1d         *float64 `json:"rate_limit_1d"`
 	RateLimit7d         *float64 `json:"rate_limit_7d"`
 	ResetRateLimitUsage *bool    `json:"reset_rate_limit_usage"` // 重置限速用量
+}
+
+func validAPIKeyLimit(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0
+}
+
+func validateAPIKeyCreateRequest(req CreateAPIKeyRequest) error {
+	for _, limit := range []*float64{req.Quota, req.RateLimit5h, req.RateLimit1d, req.RateLimit7d} {
+		if limit != nil && !validAPIKeyLimit(*limit) {
+			return errors.New("invalid numeric limit")
+		}
+	}
+	if req.ExpiresInDays != nil && *req.ExpiresInDays <= 0 {
+		return errors.New("invalid expires_in_days")
+	}
+	return nil
+}
+
+func validateAPIKeyUpdateRequest(req UpdateAPIKeyRequest) error {
+	for _, limit := range []*float64{req.Quota, req.RateLimit5h, req.RateLimit1d, req.RateLimit7d} {
+		if limit != nil && !validAPIKeyLimit(*limit) {
+			return errors.New("invalid numeric limit")
+		}
+	}
+	return nil
 }
 
 // List handles listing user's API keys with pagination
@@ -152,6 +179,10 @@ func (h *APIKeyHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
+	if err := validateAPIKeyCreateRequest(req); err != nil {
+		response.BadRequest(c, "Invalid request: numeric limits must be finite and non-negative, and expires_in_days must be greater than zero")
+		return
+	}
 
 	svcReq := service.CreateAPIKeyRequest{
 		Name:          req.Name,
@@ -201,6 +232,10 @@ func (h *APIKeyHandler) Update(c *gin.Context) {
 	var req UpdateAPIKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if err := validateAPIKeyUpdateRequest(req); err != nil {
+		response.BadRequest(c, "Invalid request: numeric limits must be finite and non-negative")
 		return
 	}
 

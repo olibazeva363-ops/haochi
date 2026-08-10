@@ -1987,6 +1987,12 @@ func (h *AuthHandler) ExchangePendingOAuthCompletion(c *gin.Context) {
 		response.Success(c, payload)
 		return
 	}
+	// A non-terminal session may point at an existing user's email without
+	// proving ownership. Never apply an OAuth identity adoption from that state.
+	if !pendingOAuthCompletionMayApplyAdoption(canIssueTokenPair, session.Intent) {
+		response.Success(c, payload)
+		return
+	}
 	if !adoptionDecision.hasDecision() {
 		adoptionRequired, _ := payload["adoption_required"].(bool)
 		if adoptionRequired {
@@ -2037,4 +2043,8 @@ func (h *AuthHandler) ExchangePendingOAuthCompletion(c *gin.Context) {
 
 	clearCookies()
 	response.Success(c, payload)
+}
+
+func pendingOAuthCompletionMayApplyAdoption(canIssueTokenPair bool, intent string) bool {
+	return canIssueTokenPair || strings.EqualFold(strings.TrimSpace(intent), oauthIntentBindCurrentUser)
 }

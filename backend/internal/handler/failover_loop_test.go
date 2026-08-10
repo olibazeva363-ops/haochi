@@ -266,6 +266,25 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 	})
 }
 
+func TestHandleFailoverError_AnthropicRiskDenialSkipsSameAccountRetry(t *testing.T) {
+	fs := NewFailoverState(10, false)
+	mock := &mockTempUnscheduler{}
+	err := newTestFailoverErr(http.StatusForbidden, true, false)
+
+	require.Equal(t, FailoverContinue, fs.HandleFailoverError(context.Background(), mock, 101, service.PlatformAnthropic, 3, err))
+	require.Equal(t, 1, fs.SwitchCount)
+	require.Empty(t, fs.SameAccountRetryCount, "Anthropic 403 must bypass pool-mode same-account retries")
+	require.Empty(t, mock.calls, "risk denials should not enter same-account retry cooldown")
+}
+
+func TestAllowSameAccountRetry_OnlyBlocksAnthropicRiskResponses(t *testing.T) {
+	require.False(t, allowSameAccountRetry(service.PlatformAnthropic, http.StatusUnauthorized))
+	require.False(t, allowSameAccountRetry(service.PlatformAnthropic, http.StatusForbidden))
+	require.False(t, allowSameAccountRetry(service.PlatformAnthropic, http.StatusTooManyRequests))
+	require.True(t, allowSameAccountRetry(service.PlatformAnthropic, http.StatusBadGateway))
+	require.True(t, allowSameAccountRetry(service.PlatformOpenAI, http.StatusForbidden))
+}
+
 // ---------------------------------------------------------------------------
 // HandleFailoverError — 缓存计费 (ForceCacheBilling)
 // ---------------------------------------------------------------------------

@@ -25,6 +25,8 @@ var (
 	userAgentVersionRegex = regexp.MustCompile(`/(\d+)\.(\d+)\.(\d+)`)
 )
 
+const maxFingerprintHeaderValueBytes = 256
+
 // 默认指纹值（当客户端未提供时使用）
 var defaultFingerprint = Fingerprint{
 	UserAgent:               "claude-cli/" + claude.CLICurrentVersion + " (external, cli)",
@@ -121,22 +123,32 @@ func (s *IdentityService) GetOrCreateFingerprint(ctx context.Context, accountID 
 
 // createFingerprintFromHeaders 从请求头创建指纹
 func (s *IdentityService) createFingerprintFromHeaders(headers http.Header) *Fingerprint {
-	fp := &Fingerprint{}
-
-	// 获取User-Agent
-	if ua := headers.Get("User-Agent"); ua != "" {
-		fp.UserAgent = ua
-	} else {
-		fp.UserAgent = defaultFingerprint.UserAgent
+	fp := &Fingerprint{
+		UserAgent:               defaultFingerprint.UserAgent,
+		StainlessLang:           defaultFingerprint.StainlessLang,
+		StainlessPackageVersion: defaultFingerprint.StainlessPackageVersion,
+		StainlessOS:             defaultFingerprint.StainlessOS,
+		StainlessArch:           defaultFingerprint.StainlessArch,
+		StainlessRuntime:        defaultFingerprint.StainlessRuntime,
+		StainlessRuntimeVersion: defaultFingerprint.StainlessRuntimeVersion,
 	}
 
-	// 获取x-stainless-*头，如果没有则使用默认值
-	fp.StainlessLang = getHeaderOrDefault(headers, "X-Stainless-Lang", defaultFingerprint.StainlessLang)
-	fp.StainlessPackageVersion = getHeaderOrDefault(headers, "X-Stainless-Package-Version", defaultFingerprint.StainlessPackageVersion)
-	fp.StainlessOS = getHeaderOrDefault(headers, "X-Stainless-OS", defaultFingerprint.StainlessOS)
-	fp.StainlessArch = getHeaderOrDefault(headers, "X-Stainless-Arch", defaultFingerprint.StainlessArch)
-	fp.StainlessRuntime = getHeaderOrDefault(headers, "X-Stainless-Runtime", defaultFingerprint.StainlessRuntime)
-	fp.StainlessRuntimeVersion = getHeaderOrDefault(headers, "X-Stainless-Runtime-Version", defaultFingerprint.StainlessRuntimeVersion)
+	// Account fingerprints are shared by every downstream request routed to the
+	// account. Only learn them from a structurally valid Claude CLI request.
+	ua := strings.TrimSpace(headers.Get("User-Agent"))
+	if !isSafeClaudeFingerprintUserAgent(ua) {
+		return fp
+	}
+	fp.UserAgent = ua
+
+	// Learn SDK metadata from the same validated request. Invalid values fall
+	// back to stable defaults instead of poisoning the account-level identity.
+	fp.StainlessLang = getSafeHeaderOrDefault(headers, "X-Stainless-Lang", defaultFingerprint.StainlessLang)
+	fp.StainlessPackageVersion = getSafeHeaderOrDefault(headers, "X-Stainless-Package-Version", defaultFingerprint.StainlessPackageVersion)
+	fp.StainlessOS = getSafeHeaderOrDefault(headers, "X-Stainless-OS", defaultFingerprint.StainlessOS)
+	fp.StainlessArch = getSafeHeaderOrDefault(headers, "X-Stainless-Arch", defaultFingerprint.StainlessArch)
+	fp.StainlessRuntime = getSafeHeaderOrDefault(headers, "X-Stainless-Runtime", defaultFingerprint.StainlessRuntime)
+	fp.StainlessRuntimeVersion = getSafeHeaderOrDefault(headers, "X-Stainless-Runtime-Version", defaultFingerprint.StainlessRuntimeVersion)
 
 	return fp
 }
@@ -147,7 +159,7 @@ func (s *IdentityService) createFingerprintFromHeaders(headers http.Header) *Fin
 // 本函数用于升级更新，缺失头保留缓存值，避免将已知的真实值退化为硬编码默认值
 func mergeHeadersIntoFingerprint(fp *Fingerprint, headers http.Header) {
 	// User-Agent：版本升级的触发条件，一定存在
-	if ua := headers.Get("User-Agent"); ua != "" {
+	if ua := strings.TrimSpace(headers.Get("User-Agent")); isSafeClaudeFingerprintUserAgent(ua) {
 		fp.UserAgent = ua
 	}
 	// X-Stainless-* 头：仅在请求中实际携带时才更新，否则保留缓存值
@@ -161,17 +173,32 @@ func mergeHeadersIntoFingerprint(fp *Fingerprint, headers http.Header) {
 
 // mergeHeader 如果请求头中存在该字段则更新目标值，否则保留原值
 func mergeHeader(headers http.Header, key string, target *string) {
-	if v := headers.Get(key); v != "" {
+	if v := strings.TrimSpace(headers.Get(key)); isSafeFingerprintHeaderValue(v) {
 		*target = v
 	}
 }
 
-// getHeaderOrDefault 获取header值，如果不存在则返回默认值
-func getHeaderOrDefault(headers http.Header, key, defaultValue string) string {
-	if v := headers.Get(key); v != "" {
+func getSafeHeaderOrDefault(headers http.Header, key, defaultValue string) string {
+	if v := strings.TrimSpace(headers.Get(key)); isSafeFingerprintHeaderValue(v) {
 		return v
 	}
 	return defaultValue
+}
+
+func isSafeClaudeFingerprintUserAgent(ua string) bool {
+	return isSafeFingerprintHeaderValue(ua) && claudeCodeUAPattern.MatchString(ua)
+}
+
+func isSafeFingerprintHeaderValue(value string) bool {
+	if value == "" || len(value) > maxFingerprintHeaderValueBytes {
+		return false
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // ApplyFingerprint 将指纹应用到请求头（覆盖原有的x-stainless-*头）

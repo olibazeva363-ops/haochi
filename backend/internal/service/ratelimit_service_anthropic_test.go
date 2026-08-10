@@ -7,6 +7,27 @@ import (
 	"time"
 )
 
+func TestParseRetryAfterResetTime_AnthropicFallback(t *testing.T) {
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+
+	t.Run("delta seconds", func(t *testing.T) {
+		headers := http.Header{"Retry-After": []string{"90"}}
+		resetAt := parseRetryAfterResetTime(headers, now)
+		if resetAt == nil || !resetAt.Equal(now.Add(90*time.Second)) {
+			t.Fatalf("expected reset at %v, got %v", now.Add(90*time.Second), resetAt)
+		}
+	})
+
+	t.Run("http date", func(t *testing.T) {
+		want := now.Add(5 * time.Minute)
+		headers := http.Header{"Retry-After": []string{want.Format(http.TimeFormat)}}
+		resetAt := parseRetryAfterResetTime(headers, now)
+		if resetAt == nil || !resetAt.Equal(want) {
+			t.Fatalf("expected reset at %v, got %v", want, resetAt)
+		}
+	})
+}
+
 func TestCalculateAnthropic429ResetTime_Only5hExceeded(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("anthropic-ratelimit-unified-5h-utilization", "1.02")
