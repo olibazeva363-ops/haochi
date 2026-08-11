@@ -260,7 +260,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				// metadata 透传开启时跳过 metadata 注入
 				_, mimicMPT, _ := s.settingService.GetGatewayForwardingSettings(ctx)
 				if !mimicMPT {
-					if metadataUserID := s.buildOAuthMetadataUserID(parsed, account, fp); metadataUserID != "" {
+					if metadataUserID := s.buildOAuthMetadataUserID(parsed, account, fp, c); metadataUserID != "" {
 						normalizeOpts.injectMetadata = true
 						normalizeOpts.metadataUserID = metadataUserID
 					}

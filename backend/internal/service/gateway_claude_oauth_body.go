@@ -320,7 +320,7 @@ func normalizeClaudeOAuthRequestBody(body []byte, modelID string, opts claudeOAu
 	return out, modelID
 }
 
-func (s *GatewayService) buildOAuthMetadataUserID(parsed *ParsedRequest, account *Account, fp *Fingerprint) string {
+func (s *GatewayService) buildOAuthMetadataUserID(parsed *ParsedRequest, account *Account, fp *Fingerprint, c *gin.Context) string {
 	if parsed == nil || account == nil {
 		return ""
 	}
@@ -345,7 +345,8 @@ func (s *GatewayService) buildOAuthMetadataUserID(parsed *ParsedRequest, account
 	if parsed.Body != nil {
 		firstUserText = extractFirstUserText(parsed.Body.Bytes())
 	}
-	seed := buildStableSessionSeed(account.ID, sessionContextDiscriminator(parsed.SessionContext), firstUserText)
+	discriminator := claudeOAuthSessionDiscriminator(c, parsed.SessionContext, fp)
+	seed := buildStableSessionSeed(account.ID, discriminator, firstUserText)
 	sessionID := generateSessionUUID(seed)
 
 	// 根据指纹 UA 版本选择输出格式
@@ -404,7 +405,7 @@ func (s *GatewayService) applyClaudeCodeOAuthMimicryToBody(
 				_, mimicMPT, _ = s.settingService.GetGatewayForwardingSettings(ctx)
 			}
 			if !mimicMPT {
-				if uid := s.buildOAuthMetadataUserIDFromBody(ctx, account, fp, body); uid != "" {
+				if uid := s.buildOAuthMetadataUserIDFromBody(ctx, account, fp, body, c); uid != "" {
 					normalizeOpts.injectMetadata = true
 					normalizeOpts.metadataUserID = uid
 				}
@@ -445,6 +446,7 @@ func (s *GatewayService) buildOAuthMetadataUserIDFromBody(
 	account *Account,
 	fp *Fingerprint,
 	body []byte,
+	c *gin.Context,
 ) string {
 	_ = ctx
 	if account == nil {
@@ -464,10 +466,7 @@ func (s *GatewayService) buildOAuthMetadataUserIDFromBody(
 
 	// 与 buildOAuthMetadataUserID 一致：用会话级稳定种子，避免整 body 哈希导致
 	// 每轮（甚至每个 token 变化）都重算出不同的 session_id。
-	var clientDiscriminator string
-	if fp != nil {
-		clientDiscriminator = fp.ClientID
-	}
+	clientDiscriminator := claudeOAuthSessionDiscriminator(c, nil, fp)
 	seed := buildStableSessionSeed(account.ID, clientDiscriminator, extractFirstUserText(body))
 	sessionID := generateSessionUUID(seed)
 
@@ -503,7 +502,52 @@ func sessionContextDiscriminator(sc *SessionContext) string {
 	if sc == nil {
 		return ""
 	}
-	return sc.ClientIP + ":" + NormalizeSessionUserAgent(sc.UserAgent) + ":" + strconv.FormatInt(sc.APIKeyID, 10)
+	if sc.APIKeyID > 0 {
+		return "api-key:" + strconv.FormatInt(sc.APIKeyID, 10)
+	}
+	if ua := NormalizeSessionUserAgent(sc.UserAgent); ua != "" {
+		return "client:" + ua
+	}
+	return "ip:" + strings.TrimSpace(sc.ClientIP)
+}
+
+func claudeOAuthSessionDiscriminator(c *gin.Context, sc *SessionContext, fp *Fingerprint) string {
+	if c != nil && c.Request != nil {
+		if sessionID := strings.TrimSpace(getHeaderRaw(c.Request.Header, "X-Claude-Code-Session-Id")); isSafeFingerprintHeaderValue(sessionID) {
+			return hashClaudeOAuthDiscriminator("session", sessionID)
+		}
+	}
+	if stable := sessionContextDiscriminator(sc); stable != "" && stable != "ip:" {
+		return stable
+	}
+	if c != nil {
+		if value, exists := c.Get("api_key"); exists {
+			if apiKey, ok := value.(*APIKey); ok && apiKey != nil && apiKey.ID > 0 {
+				return "api-key:" + strconv.FormatInt(apiKey.ID, 10)
+			}
+		}
+		if c.Request != nil {
+			credential := strings.TrimSpace(getHeaderRaw(c.Request.Header, "authorization"))
+			if len(credential) >= 7 && strings.EqualFold(credential[:7], "Bearer ") {
+				credential = strings.TrimSpace(credential[7:])
+			}
+			if credential == "" {
+				credential = strings.TrimSpace(getHeaderRaw(c.Request.Header, "x-api-key"))
+			}
+			if credential != "" {
+				return hashClaudeOAuthDiscriminator("api-key", credential)
+			}
+		}
+	}
+	if fp != nil && fp.ClientID != "" {
+		return "device:" + fp.ClientID
+	}
+	return sessionContextDiscriminator(sc)
+}
+
+func hashClaudeOAuthDiscriminator(kind, value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return kind + ":" + fmt.Sprintf("%x", sum[:])
 }
 
 // GenerateSessionUUID creates a deterministic UUID4 from a seed string.
