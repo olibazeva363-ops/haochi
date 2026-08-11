@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
 	"github.com/Wei-Shaw/sub2api/internal/web"
@@ -74,6 +75,11 @@ func main() {
 		return
 	}
 
+	if repository.ClaudeAccountWorkerModeEnabled() {
+		runClaudeAccountWorker()
+		return
+	}
+
 	// Check if setup is needed
 	if setup.NeedsSetup() {
 		// Check if auto-setup is enabled (for Docker deployment)
@@ -92,6 +98,33 @@ func main() {
 
 	// Normal server mode
 	runMainServer()
+}
+
+func runClaudeAccountWorker() {
+	// The worker only needs the upstream transport defaults. Skipping the full
+	// application config avoids initializing unrelated database, JWT, and TOTP
+	// settings inside every account container.
+	server, err := repository.NewClaudeAccountWorkerServer(nil)
+	if err != nil {
+		log.Fatalf("Failed to initialize Claude account worker: %v", err)
+	}
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Claude account worker failed: %v", err)
+		}
+	}()
+	log.Printf("Claude account worker %s started on %s", strings.TrimSpace(os.Getenv("CLAUDE_ACCOUNT_WORKER_ID")), server.Addr)
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := repository.ShutdownClaudeAccountWorker(ctx, server); err != nil {
+		log.Printf("Claude account worker forced to shutdown: %v", err)
+	}
 }
 
 func runSetupServer() {
