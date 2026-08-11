@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 
@@ -200,7 +201,7 @@ func TestHandle529_EnabledFromDB_PausesAccount(t *testing.T) {
 
 	account := &Account{ID: 42, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
 	before := time.Now()
-	svc.handle529(context.Background(), account)
+	svc.handle529(context.Background(), account, nil)
 
 	require.Equal(t, 1, accountRepo.overloadCalls)
 	require.Equal(t, int64(42), accountRepo.lastOverloadID)
@@ -218,9 +219,21 @@ func TestHandle529_DisabledFromDB_SkipsAccount(t *testing.T) {
 	svc.SetSettingService(settingSvc)
 
 	account := &Account{ID: 42, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
-	svc.handle529(context.Background(), account)
+	svc.handle529(context.Background(), account, nil)
 
 	require.Equal(t, 0, accountRepo.overloadCalls, "should NOT pause when disabled")
+}
+
+func TestHandle529_AnthropicRetryAfterOverridesLongerDefault(t *testing.T) {
+	accountRepo := &overloadAccountRepoStub{}
+	svc := NewRateLimitService(accountRepo, nil, &config.Config{}, nil, nil)
+	account := &Account{ID: 43, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
+	before := time.Now()
+
+	svc.handle529(context.Background(), account, http.Header{"Retry-After": []string{"20"}})
+
+	require.Equal(t, 1, accountRepo.overloadCalls)
+	require.WithinDuration(t, before.Add(20*time.Second), accountRepo.lastOverloadEnd, 2*time.Second)
 }
 
 func TestHandle529_NilSettingService_FallsBackToConfig(t *testing.T) {
@@ -232,7 +245,7 @@ func TestHandle529_NilSettingService_FallsBackToConfig(t *testing.T) {
 
 	account := &Account{ID: 77, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
 	before := time.Now()
-	svc.handle529(context.Background(), account)
+	svc.handle529(context.Background(), account, nil)
 
 	require.Equal(t, 1, accountRepo.overloadCalls)
 	require.WithinDuration(t, before.Add(20*time.Minute), accountRepo.lastOverloadEnd, 2*time.Second)
@@ -244,7 +257,7 @@ func TestHandle529_NilSettingService_ZeroConfig_DefaultsTen(t *testing.T) {
 
 	account := &Account{ID: 88, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
 	before := time.Now()
-	svc.handle529(context.Background(), account)
+	svc.handle529(context.Background(), account, nil)
 
 	require.Equal(t, 1, accountRepo.overloadCalls)
 	require.WithinDuration(t, before.Add(10*time.Minute), accountRepo.lastOverloadEnd, 2*time.Second)
@@ -263,7 +276,7 @@ func TestHandle529_DBReadError_FallsBackToConfig(t *testing.T) {
 
 	account := &Account{ID: 99, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
 	before := time.Now()
-	svc.handle529(context.Background(), account)
+	svc.handle529(context.Background(), account, nil)
 
 	require.Equal(t, 1, accountRepo.overloadCalls)
 	require.WithinDuration(t, before.Add(7*time.Minute), accountRepo.lastOverloadEnd, 2*time.Second)

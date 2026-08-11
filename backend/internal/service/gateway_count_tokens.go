@@ -142,7 +142,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	}
 
 	// 发送请求
-	resp, err := s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, tlsProfileForRequest(upstreamReq, s.tlsFPProfileService.ResolveTLSProfile(account)))
 	if err != nil {
 		setOpsUpstreamError(c, 0, sanitizeUpstreamErrorMessage(err.Error()), "")
 		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Request failed")
@@ -169,7 +169,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 		filteredBody := FilterThinkingBlocksForRetry(body, reqModel)
 		retryReq, retryWireBody, buildErr := s.buildCountTokensRequest(ctx, c, account, filteredBody, token, tokenType, reqModel, shouldMimicClaudeCode)
 		if buildErr == nil {
-			retryResp, retryErr := s.httpUpstream.DoWithTLS(retryReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+			retryResp, retryErr := s.httpUpstream.DoWithTLS(retryReq, proxyURL, account.ID, account.Concurrency, tlsProfileForRequest(retryReq, s.tlsFPProfileService.ResolveTLSProfile(account)))
 			if retryErr == nil {
 				if retryResp.StatusCode < 400 {
 					// count_tokens 签名重试成功后记录最终 wire body，错误响应仍保留原 body 便于后续处理。
@@ -459,20 +459,40 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 
 	// OAuth 账号：应用统一指纹和重写 userID（受设置开关控制）
 	// 如果启用了会话ID伪装，会在重写后替换 session 部分为固定值
-	ctEnableFP, ctEnableMPT := true, false
+	ctEnableFP, ctEnableMPT, ctEnableCCH := true, false, false
 	if s.settingService != nil {
-		ctEnableFP, ctEnableMPT, _ = s.settingService.GetGatewayForwardingSettings(ctx)
+		ctEnableFP, ctEnableMPT, ctEnableCCH = s.settingService.GetGatewayForwardingSettings(ctx)
 	}
 	var ctFingerprint *Fingerprint
+	var frozenProfile *ClaudeFrozenEnvironmentProfile
+	if tokenType == "oauth" && mimicClaudeCode && ctEnableFP {
+		profile, err := s.getOrCreateClaudeFrozenEnvironmentProfile(ctx, account)
+		if err != nil {
+			logger.LegacyPrintf("service.gateway", "Warning: failed to load frozen Claude environment profile for account %d: %v", account.ID, err)
+		} else {
+			frozenProfile = profile
+			ctFingerprint = profile.fingerprint()
+			s.observeClaudeFrozenTransport(account, profile)
+		}
+	}
 	if account.IsOAuth() && s.identityService != nil {
-		fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, clientHeaders)
-		if err == nil {
-			ctFingerprint = fp
+		fp := ctFingerprint
+		if fp == nil {
+			fp, _ = s.identityService.GetOrCreateFingerprint(ctx, account.ID, clientHeaders)
+			if fp != nil && ctEnableFP {
+				ctFingerprint = fp
+			}
+		}
+		if fp != nil {
 			if !ctEnableMPT {
-				accountUUID := account.GetExtraString("account_uuid")
-				if accountUUID != "" && fp.ClientID != "" {
-					if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent); err == nil && len(newBody) > 0 {
-						body = newBody
+				if frozenProfile != nil {
+					body = s.rewriteClaudeFrozenMetadata(ctx, body, account, frozenProfile)
+				} else {
+					accountUUID := account.GetExtraString("account_uuid")
+					if accountUUID != "" && fp.ClientID != "" {
+						if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent); err == nil && len(newBody) > 0 {
+							body = newBody
+						}
 					}
 				}
 			}
@@ -490,6 +510,11 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	finalBetaHeader, finalBetaShouldSet := s.computeFinalCountTokensAnthropicBeta(
 		tokenType, mimicClaudeCode, modelID, clientHeaders, body, ctEffectiveDropSet,
 	)
+	if frozenProfile != nil {
+		requiredBetas := append(append([]string(nil), frozenProfile.BetaSet...), claude.BetaTokenCounting)
+		finalBetaHeader = mergeAnthropicBetaDropping(requiredBetas, "", ctEffectiveDropSet)
+		finalBetaShouldSet = true
+	}
 
 	// 账号覆写了 anthropic-beta 时，覆写值即最终上游值：净化以覆写值为准
 	if beta, ok := account.HeaderOverrideValue("anthropic-beta"); ok {
@@ -502,6 +527,9 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	}
 
 	body = sanitizeCountTokensRequestBody(body)
+	if tokenType == "oauth" && mimicClaudeCode && ctEnableCCH {
+		body = signBillingHeaderCCH(body)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -564,6 +592,12 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 
 	// 账号级请求头覆写（仅 anthropic/openai api_key 账号启用时生效；OAuth 路径 no-op）
 	account.ApplyHeaderOverrides(req.Header)
+	if frozenProfile != nil {
+		if err := s.finalizeClaudeFrozenMimicRequest(req, frozenProfile, false, finalBetaHeader, finalBetaShouldSet); err != nil {
+			return nil, nil, err
+		}
+		req = attachClaudeFrozenTLSProfile(req, s.resolveTLSProfileForFrozenClaudeAccount(account, frozenProfile))
+	}
 
 	if c != nil && tokenType == "oauth" {
 		c.Set(claudeMimicDebugInfoKey, buildClaudeMimicDebugLine(req, body, account, tokenType, mimicClaudeCode))

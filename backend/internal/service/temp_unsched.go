@@ -22,6 +22,14 @@ type TempUnschedCache interface {
 	DeleteTempUnsched(ctx context.Context, accountID int64) error
 }
 
+// AnthropicProtectionCounterCache is an optional extension implemented by the
+// Redis temp-unsched cache. RateLimitService uses a type assertion so tests and
+// alternative cache implementations remain source-compatible.
+type AnthropicProtectionCounterCache interface {
+	IncrementAnthropicProtectionFailure(ctx context.Context, accountID int64, failureClass string, window time.Duration) (int64, error)
+	ResetAnthropicProtectionFailures(ctx context.Context, accountID int64) error
+}
+
 // TimeoutCounterCache 超时计数器缓存接口
 type TimeoutCounterCache interface {
 	// IncrementTimeoutCount 增加账户的超时计数，返回当前计数值

@@ -80,6 +80,21 @@ const (
 	openAI403CounterWindowMinutes   = 180
 )
 
+const (
+	anthropicAccessFailureClass    = "access"
+	anthropicProviderFailureClass  = "provider"
+	anthropicTransportFailureClass = "transport"
+
+	anthropicAccessFailureWindow    = 3 * time.Hour
+	anthropicProviderFailureWindow  = 2 * time.Minute
+	anthropicTransportFailureWindow = time.Minute
+
+	anthropicProviderOpenThreshold  = 4
+	anthropicTransportOpenThreshold = 3
+	anthropicProviderCooldown       = 45 * time.Second
+	anthropicTransportCooldown      = 20 * time.Second
+)
+
 // NewRateLimitService 创建RateLimitService实例
 func NewRateLimitService(accountRepo AccountRepository, usageRepo UsageLogRepository, cfg *config.Config, geminiQuotaService *GeminiQuotaService, tempUnschedCache TempUnschedCache) *RateLimitService {
 	return &RateLimitService{
@@ -376,7 +391,7 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		s.handle429(ctx, account, headers, responseBody)
 		shouldDisable = false
 	case 529:
-		s.handle529(ctx, account)
+		s.handle529(ctx, account, headers)
 		shouldDisable = false
 	default:
 		// 自定义错误码启用时：在列表中的错误码都应该停止调度
@@ -388,7 +403,16 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			s.handleCustomErrorCode(ctx, account, statusCode, msg)
 			shouldDisable = true
 		} else if statusCode >= 500 {
-			// 未启用自定义错误码时：仅记录5xx错误
+			// Anthropic OAuth/SetupToken: only repeated provider failures open a
+			// short circuit. A single 5xx never penalizes the account.
+			if account.IsAnthropicOAuthOrSetupToken() {
+				message := upstreamMsg
+				if message == "" {
+					message = http.StatusText(statusCode)
+				}
+				s.recordAnthropicProviderFailure(ctx, account, statusCode, message)
+			}
+			// 未启用自定义错误码时：记录5xx错误
 			slog.Warn("account_upstream_error", "account_id", account.ID, "status_code", statusCode)
 			shouldDisable = false
 		}
@@ -811,6 +835,9 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 	if account.Platform == PlatformOpenAI {
 		return s.handleOpenAI403(ctx, account, upstreamMsg, responseBody)
 	}
+	if account.IsAnthropicOAuthOrSetupToken() {
+		return s.handleAnthropic403(ctx, account, upstreamMsg, responseBody)
+	}
 	// 非 Antigravity 平台：保持原有行为
 	msg := buildForbiddenErrorMessage(
 		"Access forbidden (403):",
@@ -820,6 +847,174 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 	)
 	s.handleAuthError(ctx, account, msg)
 	return true
+}
+
+func isPermanentAnthropicAccessDenial(upstreamMsg string, responseBody []byte) bool {
+	combined := strings.ToLower(strings.TrimSpace(upstreamMsg + " " + string(responseBody)))
+	if combined == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"organization has been disabled",
+		"organization is disabled",
+		"organization has been suspended",
+		"account has been disabled",
+		"account is disabled",
+		"account has been suspended",
+		"account is suspended",
+		"account has been banned",
+		"account is banned",
+		"terms of service violation",
+		"access has been revoked",
+	} {
+		if strings.Contains(combined, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func anthropicAccessCooldown(count int64) time.Duration {
+	switch {
+	case count <= 1:
+		return time.Minute
+	case count == 2:
+		return 3 * time.Minute
+	default:
+		return 10 * time.Minute
+	}
+}
+
+func (s *RateLimitService) anthropicProtectionCounterCache() AnthropicProtectionCounterCache {
+	if s == nil || s.tempUnschedCache == nil {
+		return nil
+	}
+	cache, _ := s.tempUnschedCache.(AnthropicProtectionCounterCache)
+	return cache
+}
+
+func (s *RateLimitService) incrementAnthropicProtectionFailure(
+	ctx context.Context,
+	accountID int64,
+	failureClass string,
+	window time.Duration,
+) int64 {
+	cache := s.anthropicProtectionCounterCache()
+	if cache == nil {
+		return 1
+	}
+	count, err := cache.IncrementAnthropicProtectionFailure(ctx, accountID, failureClass, window)
+	if err != nil {
+		slog.Warn("anthropic_protection_counter_failed", "account_id", accountID, "class", failureClass, "error", err)
+		return 1
+	}
+	if count < 1 {
+		return 1
+	}
+	return count
+}
+
+func (s *RateLimitService) setAnthropicProtectionCooldown(
+	ctx context.Context,
+	account *Account,
+	failureClass string,
+	statusCode int,
+	count int64,
+	cooldown time.Duration,
+	message string,
+) {
+	if s == nil || account == nil || s.accountRepo == nil || cooldown <= 0 {
+		return
+	}
+	now := time.Now()
+	until := now.Add(cooldown)
+	reason := fmt.Sprintf("Anthropic %s circuit cooldown (failure=%d, cooldown=%s): %s", failureClass, count, cooldown, message)
+	account.TempUnschedulableUntil = &until
+	account.TempUnschedulableReason = reason
+	s.notifyAccountSchedulingBlocked(account, until, "anthropic_"+failureClass+"_circuit")
+	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); err != nil {
+		slog.Warn("anthropic_protection_cooldown_persist_failed", "account_id", account.ID, "class", failureClass, "error", err)
+		return
+	}
+	if s.tempUnschedCache != nil {
+		state := &TempUnschedState{
+			UntilUnix:       until.Unix(),
+			TriggeredAtUnix: now.Unix(),
+			StatusCode:      statusCode,
+			MatchedKeyword:  failureClass,
+			RuleIndex:       -1,
+			ErrorMessage:    message,
+		}
+		if err := s.tempUnschedCache.SetTempUnsched(ctx, account.ID, state); err != nil {
+			slog.Warn("anthropic_protection_cooldown_cache_failed", "account_id", account.ID, "class", failureClass, "error", err)
+		}
+	}
+	slog.Warn(
+		"anthropic_protection_circuit_open",
+		"account_id", account.ID,
+		"class", failureClass,
+		"status_code", statusCode,
+		"failure_count", count,
+		"cooldown", cooldown,
+		"until", until,
+	)
+}
+
+// handleAnthropic403 keeps ambiguous access failures recoverable. Explicit
+// suspension/revocation signals still disable the account immediately.
+func (s *RateLimitService) handleAnthropic403(ctx context.Context, account *Account, upstreamMsg string, responseBody []byte) bool {
+	msg := buildForbiddenErrorMessage(
+		"Access forbidden (403):",
+		upstreamMsg,
+		responseBody,
+		"temporary upstream access rejection",
+	)
+	if isPermanentAnthropicAccessDenial(upstreamMsg, responseBody) {
+		s.handleAuthError(ctx, account, msg)
+		slog.Warn("anthropic_access_denial_permanent", "account_id", account.ID, "message", upstreamMsg)
+		return true
+	}
+
+	count := s.incrementAnthropicProtectionFailure(ctx, account.ID, anthropicAccessFailureClass, anthropicAccessFailureWindow)
+	s.setAnthropicProtectionCooldown(ctx, account, anthropicAccessFailureClass, http.StatusForbidden, count, anthropicAccessCooldown(count), msg)
+	return true
+}
+
+func (s *RateLimitService) recordAnthropicProviderFailure(ctx context.Context, account *Account, statusCode int, message string) {
+	if s == nil || account == nil || !account.IsAnthropicOAuthOrSetupToken() {
+		return
+	}
+	count := s.incrementAnthropicProtectionFailure(ctx, account.ID, anthropicProviderFailureClass, anthropicProviderFailureWindow)
+	if count < anthropicProviderOpenThreshold {
+		slog.Info("anthropic_provider_failure_observed", "account_id", account.ID, "status_code", statusCode, "count", count, "threshold", anthropicProviderOpenThreshold)
+		return
+	}
+	s.setAnthropicProtectionCooldown(ctx, account, anthropicProviderFailureClass, statusCode, count, anthropicProviderCooldown, message)
+}
+
+// HandleAnthropicTransportFailure opens a short endpoint circuit only after
+// multiple requests have exhausted their transport retry.
+func (s *RateLimitService) HandleAnthropicTransportFailure(ctx context.Context, account *Account, message string) {
+	if s == nil || account == nil || !account.IsAnthropicOAuthOrSetupToken() {
+		return
+	}
+	count := s.incrementAnthropicProtectionFailure(ctx, account.ID, anthropicTransportFailureClass, anthropicTransportFailureWindow)
+	if count < anthropicTransportOpenThreshold {
+		slog.Info("anthropic_transport_failure_observed", "account_id", account.ID, "count", count, "threshold", anthropicTransportOpenThreshold)
+		return
+	}
+	s.setAnthropicProtectionCooldown(ctx, account, anthropicTransportFailureClass, 0, count, anthropicTransportCooldown, message)
+}
+
+// ResetAnthropicProtection closes all soft circuits after a successful request.
+func (s *RateLimitService) ResetAnthropicProtection(ctx context.Context, accountID int64) {
+	cache := s.anthropicProtectionCounterCache()
+	if cache == nil || accountID <= 0 {
+		return
+	}
+	if err := cache.ResetAnthropicProtectionFailures(ctx, accountID); err != nil {
+		slog.Warn("anthropic_protection_reset_failed", "account_id", accountID, "error", err)
+	}
 }
 
 func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account, upstreamMsg string, responseBody []byte) (shouldDisable bool) {
@@ -1583,9 +1778,9 @@ func persistOpenAI429PlanType(ctx context.Context, repo AccountRepository, accou
 	slog.Info("openai_429_plan_type_synced", "account_id", account.ID, "previous_plan_type", current, "plan_type", planType)
 }
 
-// handle529 处理529过载错误
-// 根据配置决定是否暂停账号调度及冷却时长
-func (s *RateLimitService) handle529(ctx context.Context, account *Account) {
+// handle529 处理529过载错误。Anthropic 明确给出 Retry-After 时优先
+// 使用该边界，避免短暂过载被固定放大成十分钟冷却。
+func (s *RateLimitService) handle529(ctx context.Context, account *Account, headers http.Header) {
 	var settings *OverloadCooldownSettings
 	if s.settingService != nil {
 		var err error
@@ -1609,12 +1804,26 @@ func (s *RateLimitService) handle529(ctx context.Context, account *Account) {
 		return
 	}
 
+	now := time.Now()
+	if account.Platform == PlatformAnthropic {
+		if resetAt := parseRetryAfterResetTime(headers, now); resetAt != nil &&
+			resetAt.After(now) && !resetAt.After(now.Add(2*time.Hour)) {
+			s.notifyAccountSchedulingBlocked(account, *resetAt, "529_retry_after")
+			if err := s.accountRepo.SetOverloaded(ctx, account.ID, *resetAt); err != nil {
+				slog.Warn("overload_set_failed", "account_id", account.ID, "error", err)
+				return
+			}
+			slog.Info("anthropic_overloaded_retry_after", "account_id", account.ID, "until", *resetAt, "reset_in", time.Until(*resetAt).Truncate(time.Second))
+			return
+		}
+	}
+
 	cooldownMinutes := settings.CooldownMinutes
 	if cooldownMinutes <= 0 {
 		cooldownMinutes = 10
 	}
 
-	until := time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
+	until := now.Add(time.Duration(cooldownMinutes) * time.Minute)
 	s.notifyAccountSchedulingBlocked(account, until, "529")
 	if err := s.accountRepo.SetOverloaded(ctx, account.ID, until); err != nil {
 		slog.Warn("overload_set_failed", "account_id", account.ID, "error", err)

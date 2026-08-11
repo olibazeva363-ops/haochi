@@ -30,6 +30,11 @@ const (
 	// 最大重试耗时（包含请求本身耗时 + 退避等待时间）。
 	// 用于防止极端情况下 goroutine 长时间堆积导致资源耗尽。
 	maxRetryElapsed = 10 * time.Second
+
+	// Claude OAuth transport errors are system/endpoint failures rather than
+	// account failures. Retry once with a short delay before opening any circuit.
+	claudeTransportMaxAttempts = 2
+	claudeTransportRetryDelay  = 100 * time.Millisecond
 )
 
 func (s *GatewayService) shouldRetryUpstreamError(account *Account, statusCode int) bool {
@@ -87,6 +92,49 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func isClientAbort(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	return ctx != nil && ctx.Err() != nil
+}
+
+func (s *GatewayService) cloneFailoverResponseHeaders(ctx context.Context, resp *http.Response, account *Account) http.Header {
+	if resp == nil {
+		return nil
+	}
+	headers := resp.Header.Clone()
+	if resp.StatusCode != http.StatusTooManyRequests || strings.TrimSpace(headers.Get("Retry-After")) != "" || account == nil || account.Platform != PlatformAnthropic {
+		return headers
+	}
+
+	now := time.Now()
+	var wait time.Duration
+	if reset := calculateAnthropic429ResetTime(headers); reset != nil && reset.resetAt.After(now) {
+		wait = reset.resetAt.Sub(now)
+	} else if s != nil && s.rateLimitService != nil {
+		if cooldown, enabled := s.rateLimitService.get429FallbackCooldown(ctx, account); enabled {
+			wait = cooldown
+		}
+	}
+	if wait <= 0 {
+		return headers
+	}
+	seconds := int64((wait + time.Second - 1) / time.Second)
+	const maxClientRetryAfterSeconds = int64((7 * 24 * time.Hour) / time.Second)
+	if seconds > maxClientRetryAfterSeconds {
+		seconds = maxClientRetryAfterSeconds
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	headers.Set("Retry-After", strconv.FormatInt(seconds, 10))
+	return headers
 }
 
 // Forward 转发请求到Claude API
@@ -379,7 +427,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		lastWireBody = wireBody
 
 		// 发送请求
-		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
+		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, tlsProfileForRequest(upstreamReq, tlsProfile))
 		if err != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
@@ -388,25 +436,54 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			if !errors.Is(err, context.Canceled) {
 				scheduleOllamaCloudUsageActivity(s.deferredService, account)
 			}
-			// Ensure the client receives an error response (handlers assume Forward writes on non-failover errors).
-			safeErr := sanitizeUpstreamErrorMessage(err.Error())
-			setOpsUpstreamError(c, 0, safeErr, "")
+			clientAbort := isClientAbort(ctx, err)
+			safeErr := sanitizeStreamError(err)
+			if account.IsAnthropicOAuthOrSetupToken() && !clientAbort && attempt < claudeTransportMaxAttempts {
+				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+					Platform:           account.Platform,
+					AccountID:          account.ID,
+					AccountName:        account.Name,
+					UpstreamStatusCode: 0,
+					UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
+					Kind:               "system_error_retry",
+					Message:            safeErr,
+				})
+				logger.LegacyPrintf("service.gateway", "Account %d: Claude transport error, retrying once after %v: %s", account.ID, claudeTransportRetryDelay, safeErr)
+				if sleepErr := sleepWithContext(ctx, claudeTransportRetryDelay); sleepErr != nil {
+					return nil, sleepErr
+				}
+				continue
+			}
+
+			kind := "request_error"
+			if clientAbort {
+				kind = "client_abort"
+			}
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 				Platform:           account.Platform,
 				AccountID:          account.ID,
 				AccountName:        account.Name,
 				UpstreamStatusCode: 0,
 				UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
-				Kind:               "request_error",
+				Kind:               kind,
 				Message:            safeErr,
 			})
-			c.JSON(http.StatusBadGateway, gin.H{
-				"type": "error",
-				"error": gin.H{
-					"type":    "upstream_error",
-					"message": "Upstream request failed",
-				},
-			})
+			if clientAbort {
+				return nil, err
+			}
+			if s.rateLimitService != nil {
+				s.rateLimitService.HandleAnthropicTransportFailure(ctx, account, safeErr)
+			}
+			setOpsUpstreamError(c, 0, safeErr, "")
+			if c != nil {
+				c.JSON(http.StatusBadGateway, gin.H{
+					"type": "error",
+					"error": gin.H{
+						"type":    "upstream_error",
+						"message": "Upstream request failed",
+					},
+				})
+			}
 			return nil, fmt.Errorf("upstream request failed: %s", safeErr)
 		}
 
@@ -488,7 +565,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 					retryReq, retryWireBody, buildErr := s.buildUpstreamRequest(retryCtx, c, account, filteredBody, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
 					releaseRetryCtx()
 					if buildErr == nil {
-						retryResp, retryErr := s.httpUpstream.DoWithTLS(retryReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
+						retryResp, retryErr := s.httpUpstream.DoWithTLS(retryReq, proxyURL, account.ID, account.Concurrency, tlsProfileForRequest(retryReq, tlsProfile))
 						if retryErr == nil {
 							if retryResp.StatusCode < 400 {
 								// 重试请求被上游接受后同步 ParsedRequest，保证 usage/日志看到真实请求体。
@@ -529,7 +606,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 									retryReq2, retryWireBody2, buildErr2 := s.buildUpstreamRequest(retryCtx2, c, account, filteredBody2, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
 									releaseRetryCtx2()
 									if buildErr2 == nil {
-										retryResp2, retryErr2 := s.httpUpstream.DoWithTLS(retryReq2, proxyURL, account.ID, account.Concurrency, tlsProfile)
+										retryResp2, retryErr2 := s.httpUpstream.DoWithTLS(retryReq2, proxyURL, account.ID, account.Concurrency, tlsProfileForRequest(retryReq2, tlsProfile))
 										if retryErr2 == nil {
 											if retryResp2.StatusCode < 400 {
 												// 二阶段工具块降级成功时也必须更新当前 body。
@@ -608,7 +685,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 						budgetRetryReq, budgetWireBody, buildErr := s.buildUpstreamRequest(budgetRetryCtx, c, account, rectifiedBody, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
 						releaseBudgetRetryCtx()
 						if buildErr == nil {
-							budgetRetryResp, retryErr := s.httpUpstream.DoWithTLS(budgetRetryReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
+							budgetRetryResp, retryErr := s.httpUpstream.DoWithTLS(budgetRetryReq, proxyURL, account.ID, account.Concurrency, tlsProfileForRequest(budgetRetryReq, tlsProfile))
 							if retryErr == nil {
 								if budgetRetryResp.StatusCode < 400 {
 									// budget 修正请求成功后，ParsedRequest 也要描述被接受的修正版。
@@ -726,6 +803,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
 				ResponseBody:           respBody,
+				ResponseHeaders:        s.cloneFailoverResponseHeaders(ctx, resp, account),
 				RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
 			}
 		}
@@ -760,6 +838,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           respBody,
+			ResponseHeaders:        s.cloneFailoverResponseHeaders(ctx, resp, account),
 			RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
 		}
 	}
@@ -806,7 +885,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 					logger.LegacyPrintf("service.gateway", "Account %d: 400 error, attempting failover", account.ID)
 				}
 				s.handleFailoverSideEffects(ctx, resp, account, reqModel)
-				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody}
+				return nil, &UpstreamFailoverError{
+					StatusCode:      resp.StatusCode,
+					ResponseBody:    respBody,
+					ResponseHeaders: s.cloneFailoverResponseHeaders(ctx, resp, account),
+				}
 			}
 		}
 		return s.handleErrorResponse(ctx, resp, c, account, reqModel)
@@ -870,8 +953,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				)
 
 				return nil, &UpstreamFailoverError{
-					StatusCode:   403,
-					ResponseBody: body,
+					StatusCode:      403,
+					ResponseBody:    body,
+					ResponseHeaders: resp.Header.Clone(),
 				}
 			}
 			// 流中断（缺失 terminal 事件、读错误、数据间隔超时等）时保留已观测到的
@@ -889,6 +973,10 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if account.IsAnthropicOAuthOrSetupToken() && s.rateLimitService != nil {
+		s.rateLimitService.ResetAnthropicProtection(ctx, account.ID)
 	}
 
 	return &ForwardResult{

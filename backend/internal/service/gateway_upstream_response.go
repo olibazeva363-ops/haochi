@@ -417,7 +417,11 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		}
 	}
 	if shouldDisable {
-		return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: body}
+		return nil, &UpstreamFailoverError{
+			StatusCode:      resp.StatusCode,
+			ResponseBody:    body,
+			ResponseHeaders: s.cloneFailoverResponseHeaders(ctx, resp, account),
+		}
 	}
 
 	MarkResponseCommitted(c)
@@ -1040,6 +1044,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 					return nil, &UpstreamFailoverError{
 						StatusCode:             http.StatusBadGateway,
 						ResponseBody:           body,
+						ResponseHeaders:        resp.Header.Clone(),
 						RetryableOnSameAccount: true,
 					}
 				}

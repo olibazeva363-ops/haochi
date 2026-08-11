@@ -389,7 +389,7 @@ export default {
         metadataPassthrough: 'Metadata Passthrough',
         metadataPassthroughHint: 'Pass through client\'s original metadata.user_id without rewriting. May improve upstream cache hit rates.',
         cchSigning: 'CCH Signing',
-        cchSigningHint: 'Sign the billing header in forwarded requests with CCH hash. When disabled, the placeholder is preserved.',
+        cchSigningHint: 'Legacy Claude Code CCH body-signing compatibility for gateway-generated Claude OAuth mimicry only. Keep disabled for current clients.',
         claudeOAuthSystemPromptInjection: 'Claude OAuth System Blocks',
         claudeOAuthSystemPromptInjectionHint: 'Inject Claude Code-like system blocks for Claude OAuth requests from non-Claude-Code clients. Enabled by default.',
         claudeOAuthSystemPrompt: 'Claude OAuth Expansion Prompt',

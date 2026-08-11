@@ -382,7 +382,7 @@ export default {
         metadataPassthrough: 'Metadata 透传',
         metadataPassthroughHint: '透传客户端原始 metadata.user_id，不进行重写。可能提高上游缓存命中率。',
         cchSigning: 'CCH 签名',
-        cchSigningHint: '对转发请求的 billing header 进行 CCH 哈希签名。关闭时保留原始占位符。',
+        cchSigningHint: '兼容旧版 Claude Code 的 CCH 请求体签名，仅作用于网关生成的 Claude OAuth 伪装请求。新版客户端建议关闭。',
         claudeOAuthSystemPromptInjection: 'Claude OAuth System 注入',
         claudeOAuthSystemPromptInjectionHint: '为非 Claude Code 客户端的 Claude OAuth 请求注入 Claude Code 形态的 system blocks。默认开启。',
         claudeOAuthSystemPrompt: 'Claude OAuth 扩展提示词',

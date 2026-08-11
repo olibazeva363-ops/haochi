@@ -54,29 +54,47 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 
 	// OAuth账号：应用统一指纹和metadata重写（受设置开关控制）
 	var fingerprint *Fingerprint
-	enableFP, enableMPT := true, false
+	var frozenProfile *ClaudeFrozenEnvironmentProfile
+	enableFP, enableMPT, enableCCH := true, false, false
 	if s.settingService != nil {
-		enableFP, enableMPT, _ = s.settingService.GetGatewayForwardingSettings(ctx)
+		enableFP, enableMPT, enableCCH = s.settingService.GetGatewayForwardingSettings(ctx)
+	}
+	if tokenType == "oauth" && mimicClaudeCode && enableFP {
+		profile, err := s.getOrCreateClaudeFrozenEnvironmentProfile(ctx, account)
+		if err != nil {
+			logger.LegacyPrintf("service.gateway", "Warning: failed to load frozen Claude environment profile for account %d: %v", account.ID, err)
+		} else {
+			frozenProfile = profile
+			fingerprint = profile.fingerprint()
+			s.observeClaudeFrozenTransport(account, profile)
+		}
 	}
 	if account.IsOAuth() && s.identityService != nil {
-		// 1. 获取或创建指纹（包含随机生成的ClientID）
-		fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, clientHeaders)
-		if err != nil {
-			logger.LegacyPrintf("service.gateway", "Warning: failed to get fingerprint for account %d: %v", account.ID, err)
-			// 失败时降级为透传原始headers
-		} else {
-			if enableFP {
+		fp := fingerprint
+		if fp == nil {
+			var err error
+			fp, err = s.identityService.GetOrCreateFingerprint(ctx, account.ID, clientHeaders)
+			if err != nil {
+				logger.LegacyPrintf("service.gateway", "Warning: failed to get fingerprint for account %d: %v", account.ID, err)
+				fp = nil
+			} else if enableFP {
 				fingerprint = fp
 			}
+		}
+		if fp != nil {
 
 			// 2. 重写metadata.user_id（需要指纹中的ClientID和账号的account_uuid）
 			// 如果启用了会话ID伪装，会在重写后替换 session 部分为固定值
 			// 当 metadata 透传开启时跳过重写
 			if !enableMPT {
-				accountUUID := account.GetExtraString("account_uuid")
-				if accountUUID != "" && fp.ClientID != "" {
-					if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent); err == nil && len(newBody) > 0 {
-						body = newBody
+				if frozenProfile != nil {
+					body = s.rewriteClaudeFrozenMetadata(ctx, body, account, frozenProfile)
+				} else {
+					accountUUID := account.GetExtraString("account_uuid")
+					if accountUUID != "" && fp.ClientID != "" {
+						if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent); err == nil && len(newBody) > 0 {
+							body = newBody
+						}
 					}
 				}
 			}
@@ -104,6 +122,10 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	finalBetaHeader, finalBetaShouldSet := s.computeFinalAnthropicBeta(
 		tokenType, mimicClaudeCode, modelID, clientHeaders, body, effectiveDropSet,
 	)
+	if frozenProfile != nil {
+		finalBetaHeader = mergeAnthropicBetaDropping(frozenProfile.BetaSet, "", effectiveDropSet)
+		finalBetaShouldSet = true
+	}
 
 	// 账号覆写了 anthropic-beta 时，覆写值即最终上游值（由下方 ApplyHeaderOverrides 写入）：
 	// body 能力净化必须以覆写值为准，否则 header/body 不对称会被上游 400。
@@ -114,6 +136,12 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// 能力维度 body sanitize：与最终 anthropic-beta header 对称
 	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, finalBetaHeader); changed {
 		body = sanitized
+	}
+
+	// Compatibility mode for Claude Code versions that carry the body-bound CCH
+	// field. Sign only gateway-generated OAuth mimicry, never real client traffic.
+	if tokenType == "oauth" && mimicClaudeCode && enableCCH {
+		body = signBillingHeaderCCH(body)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
@@ -187,6 +215,12 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// 账号级请求头覆写（仅 anthropic/openai api_key 账号启用时生效；OAuth 路径 no-op）。
 	// 放在所有 header 逻辑之后，确保配置值对同名头拥有最终决定权。
 	account.ApplyHeaderOverrides(req.Header)
+	if frozenProfile != nil {
+		if err := s.finalizeClaudeFrozenMimicRequest(req, frozenProfile, reqStream, finalBetaHeader, finalBetaShouldSet); err != nil {
+			return nil, nil, err
+		}
+		req = attachClaudeFrozenTLSProfile(req, s.resolveTLSProfileForFrozenClaudeAccount(account, frozenProfile))
+	}
 
 	// === DEBUG: 打印上游转发请求（headers + body 摘要），与 CLIENT_ORIGINAL 对比 ===
 	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD", req.Header, body, map[string]string{

@@ -11,6 +11,7 @@ import (
 )
 
 const tempUnschedPrefix = "temp_unsched:account:"
+const anthropicProtectionPrefix = "anthropic_protection:account:"
 
 var tempUnschedSetScript = redis.NewScript(`
 	local key = KEYS[1]
@@ -33,9 +34,21 @@ var tempUnschedSetScript = redis.NewScript(`
 	return 1
 `)
 
+var anthropicProtectionIncrScript = redis.NewScript(`
+	local key = KEYS[1]
+	local ttl = tonumber(ARGV[1])
+	local count = redis.call('INCR', key)
+	if count == 1 then
+		redis.call('EXPIRE', key, ttl)
+	end
+	return count
+`)
+
 type tempUnschedCache struct {
 	rdb *redis.Client
 }
+
+var _ service.AnthropicProtectionCounterCache = (*tempUnschedCache)(nil)
 
 func NewTempUnschedCache(rdb *redis.Client) service.TempUnschedCache {
 	return &tempUnschedCache{rdb: rdb}
@@ -88,4 +101,48 @@ func (c *tempUnschedCache) GetTempUnsched(ctx context.Context, accountID int64) 
 func (c *tempUnschedCache) DeleteTempUnsched(ctx context.Context, accountID int64) error {
 	key := fmt.Sprintf("%s%d", tempUnschedPrefix, accountID)
 	return c.rdb.Del(ctx, key).Err()
+}
+
+func anthropicProtectionKey(accountID int64, failureClass string) (string, error) {
+	switch failureClass {
+	case "access", "provider", "transport":
+		return fmt.Sprintf("%s%d:%s", anthropicProtectionPrefix, accountID, failureClass), nil
+	default:
+		return "", fmt.Errorf("unsupported anthropic protection failure class %q", failureClass)
+	}
+}
+
+// IncrementAnthropicProtectionFailure atomically tracks consecutive failures
+// across gateway instances. The first successful request deletes all classes.
+func (c *tempUnschedCache) IncrementAnthropicProtectionFailure(
+	ctx context.Context,
+	accountID int64,
+	failureClass string,
+	window time.Duration,
+) (int64, error) {
+	key, err := anthropicProtectionKey(accountID, failureClass)
+	if err != nil {
+		return 0, err
+	}
+	ttlSeconds := int64(window / time.Second)
+	if ttlSeconds < 1 {
+		ttlSeconds = 1
+	}
+	count, err := anthropicProtectionIncrScript.Run(ctx, c.rdb, []string{key}, ttlSeconds).Int64()
+	if err != nil {
+		return 0, fmt.Errorf("increment anthropic protection failure: %w", err)
+	}
+	return count, nil
+}
+
+func (c *tempUnschedCache) ResetAnthropicProtectionFailures(ctx context.Context, accountID int64) error {
+	keys := make([]string, 0, 3)
+	for _, failureClass := range []string{"access", "provider", "transport"} {
+		key, err := anthropicProtectionKey(accountID, failureClass)
+		if err != nil {
+			return err
+		}
+		keys = append(keys, key)
+	}
+	return c.rdb.Del(ctx, keys...).Err()
 }

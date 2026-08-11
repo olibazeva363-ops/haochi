@@ -337,6 +337,9 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 		for key, value := range *req.Extra {
 			extra[key] = value
 		}
+		if frozen, ok := account.Extra[claudeFrozenEnvironmentProfileExtraKey]; ok {
+			extra[claudeFrozenEnvironmentProfileExtraKey] = frozen
+		}
 		delete(extra, OllamaCloudUsageSessionExtraKey)
 		delete(extra, OllamaCloudUsageAutoRefreshExtraKey)
 		delete(extra, OllamaCloudUsageSnapshotExtraKey)
