@@ -67,7 +67,7 @@ func (s *claudeOAuthService) GetOrganizationUUID(ctx context.Context, sessionKey
 	logger.LegacyPrintf("repository.claude_oauth", "[OAuth] Step 1 Response - Status: %d", resp.StatusCode)
 
 	if !resp.IsSuccessState() {
-		return "", claudeSessionResponseError("organization lookup", resp.StatusCode)
+		return "", claudeSessionResponseError("organization lookup", resp.StatusCode, resp.Bytes())
 	}
 
 	if len(orgs) == 0 {
@@ -150,7 +150,7 @@ func (s *claudeOAuthService) GetAuthorizationCode(ctx context.Context, sessionKe
 	logger.LegacyPrintf("repository.claude_oauth", "[OAuth] Step 2 Response - Status: %d, Body: %s", resp.StatusCode, logredact.RedactJSON(resp.Bytes()))
 
 	if !resp.IsSuccessState() {
-		return "", claudeSessionResponseError("authorization", resp.StatusCode)
+		return "", claudeSessionResponseError("authorization", resp.StatusCode, resp.Bytes())
 	}
 
 	if result.RedirectURI == "" {
@@ -242,7 +242,22 @@ func claudeSessionInvalidResponse(detail string) *infraerrors.ApplicationError {
 	).WithCause(fmt.Errorf("%s", detail))
 }
 
-func claudeSessionResponseError(stage string, statusCode int) error {
+func claudeSessionResponseError(stage string, statusCode int, body []byte) error {
+	var upstreamError struct {
+		Error struct {
+			Details struct {
+				ErrorCode string `json:"error_code"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &upstreamError); err == nil &&
+		upstreamError.Error.Details.ErrorCode == "session_stale_relogin" {
+		return infraerrors.BadRequest(
+			"CLAUDE_SESSION_RELOGIN_REQUIRED",
+			"Claude requires a recent sign-in before this sessionKey can grant access. Sign out, sign in again, and copy the new sessionKey.",
+		)
+	}
+
 	switch statusCode {
 	case http.StatusUnauthorized:
 		// A 401 here belongs to Claude, not to the admin session. Keep it a 400

@@ -88,6 +88,16 @@ func (s *ClaudeOAuthServiceSuite) TestGetOrganizationUUID() {
 			errContain: "CLAUDE_SESSION_COOKIE_INVALID",
 		},
 		{
+			name: "reports_stale_session",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":{"details":{"error_code":"session_stale_relogin"}}}`))
+			},
+			wantErr:    true,
+			errContain: "CLAUDE_SESSION_RELOGIN_REQUIRED",
+		},
+		{
 			name: "invalid_json_returns_error",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -138,11 +148,12 @@ func (s *ClaudeOAuthServiceSuite) TestGetOrganizationUUID() {
 
 func (s *ClaudeOAuthServiceSuite) TestGetAuthorizationCode() {
 	tests := []struct {
-		name     string
-		handler  http.HandlerFunc
-		wantErr  bool
-		wantCode string
-		validate func(captured requestCapture)
+		name       string
+		handler    http.HandlerFunc
+		wantErr    bool
+		errContain string
+		wantCode   string
+		validate   func(captured requestCapture)
 	}{
 		{
 			name: "parses_redirect_uri",
@@ -184,6 +195,16 @@ func (s *ClaudeOAuthServiceSuite) TestGetAuthorizationCode() {
 			},
 			wantErr: true,
 		},
+		{
+			name: "reports stale session",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":{"details":{"error_code":"session_stale_relogin"}}}`))
+			},
+			wantErr:    true,
+			errContain: "CLAUDE_SESSION_RELOGIN_REQUIRED",
+		},
 	}
 
 	for _, tt := range tests {
@@ -209,6 +230,9 @@ func (s *ClaudeOAuthServiceSuite) TestGetAuthorizationCode() {
 
 			if tt.wantErr {
 				require.Error(s.T(), err)
+				if tt.errContain != "" {
+					require.ErrorContains(s.T(), err, tt.errContain)
+				}
 				return
 			}
 

@@ -963,6 +963,7 @@ export default {
         cookieErrors: {
           CLAUDE_SESSION_COOKIE_FORMAT_INVALID: 'Invalid Cookie format. Paste the sessionKey value, sessionKey=..., or a full Cookie string',
           CLAUDE_SESSION_COOKIE_INVALID: 'The sessionKey is invalid or expired. Log in to claude.ai again and copy the latest value',
+          CLAUDE_SESSION_RELOGIN_REQUIRED: 'This sessionKey was signed in too long ago. Sign out of claude.ai, sign in again, and immediately copy the new sessionKey',
           CLAUDE_SESSION_REQUEST_BLOCKED: 'Claude rejected the browser session. Use the same proxy exit as the browser, or paste the full Cookie string',
           CLAUDE_SESSION_ORGANIZATION_MISSING: 'This browser session has no available Claude organization',
           CLAUDE_SESSION_STATE_MISMATCH: 'Claude returned a mismatched authorization state. Try again',

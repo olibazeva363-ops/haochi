@@ -1014,6 +1014,7 @@ export default {
         cookieErrors: {
           CLAUDE_SESSION_COOKIE_FORMAT_INVALID: 'Cookie 格式不正确，请粘贴 sessionKey 纯值、sessionKey=... 或完整 Cookie 字符串',
           CLAUDE_SESSION_COOKIE_INVALID: 'sessionKey 无效或已过期，请重新登录 claude.ai 后复制最新值',
+          CLAUDE_SESSION_RELOGIN_REQUIRED: '该 sessionKey 的登录时间过久，Claude 要求重新验证。请退出 claude.ai 后重新登录，并立即复制新的 sessionKey',
           CLAUDE_SESSION_REQUEST_BLOCKED: 'Claude 拒绝了浏览器会话，请让账号代理与浏览器使用相同出口，或粘贴完整 Cookie 字符串',
           CLAUDE_SESSION_ORGANIZATION_MISSING: '该浏览器会话没有可用的 Claude 组织',
           CLAUDE_SESSION_STATE_MISMATCH: 'Claude 返回的授权状态不匹配，请重新尝试',

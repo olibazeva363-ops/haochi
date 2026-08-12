@@ -196,6 +196,7 @@ import type { Account } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OAuthAuthorizationFlow from './OAuthAuthorizationFlow.vue'
+import { extractI18nErrorMessage } from '@/utils/apiError'
 
 // Type for exposed OAuthAuthorizationFlow component
 // Note: defineExpose automatically unwraps refs, so we use the unwrapped types
@@ -533,8 +534,13 @@ const handleCookieAuth = async (sessionKey: string) => {
     emit('reauthorized')
     handleClose()
   } catch (error: any) {
-    claudeOAuth.error.value =
-      error.response?.data?.detail || t('admin.accounts.oauth.cookieAuthFailed')
+    claudeOAuth.error.value = extractI18nErrorMessage(
+      error,
+      t,
+      'admin.accounts.oauth.cookieErrors',
+      t('admin.accounts.oauth.cookieAuthFailed')
+    )
+    appStore.showError(claudeOAuth.error.value)
   } finally {
     claudeOAuth.loading.value = false
   }
