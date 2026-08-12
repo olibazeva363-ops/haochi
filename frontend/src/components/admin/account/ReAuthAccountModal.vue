@@ -130,12 +130,14 @@
         :show-help="isAnthropic"
         :show-proxy-warning="isAnthropic"
         :show-cookie-option="isAnthropic"
+        :show-claude-credentials-option="isAnthropic && addMethod === 'oauth'"
         :allow-multiple="false"
         :method-label="t('admin.accounts.inputMethod')"
         :platform="isOpenAI ? 'openai' : isGemini ? 'gemini' : isAntigravity ? 'antigravity' : isGrok ? 'grok' : 'anthropic'"
         :show-project-id="isGemini && geminiOAuthType === 'code_assist'"
         @generate-url="handleGenerateUrl"
         @cookie-auth="handleCookieAuth"
+        @import-claude-credentials="handleClaudeCredentialsImport"
       />
 
     </div>
@@ -198,6 +200,11 @@ import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useGrokOAuth } from '@/composables/useGrokOAuth'
 import type { Account } from '@/types'
+import { extractI18nErrorMessage } from '@/utils/apiError'
+import {
+  ClaudeOAuthCredentialsError,
+  parseClaudeOAuthCredentials
+} from '@/utils/claudeOAuthCredentials'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OAuthAuthorizationFlow from '@/components/account/OAuthAuthorizationFlow.vue'
@@ -209,6 +216,7 @@ interface OAuthFlowExposed {
   oauthState: string
   projectId: string
   sessionKey: string
+  claudeCredentials: string
   inputMethod: AuthInputMethod
   reset: () => void
 }
@@ -568,8 +576,39 @@ const handleCookieAuth = async (sessionKey: string) => {
     emit('reauthorized', updatedAccount)
     handleClose()
   } catch (error: any) {
+    claudeOAuth.error.value = extractI18nErrorMessage(
+      error,
+      t,
+      'admin.accounts.oauth.cookieErrors',
+      t('admin.accounts.oauth.cookieAuthFailed')
+    )
+    appStore.showError(claudeOAuth.error.value)
+  } finally {
+    claudeOAuth.loading.value = false
+  }
+}
+
+const handleClaudeCredentialsImport = async (content: string) => {
+  if (!props.account || !isAnthropic.value || addMethod.value !== 'oauth') return
+
+  claudeOAuth.loading.value = true
+  claudeOAuth.error.value = ''
+  try {
+    const imported = parseClaudeOAuthCredentials(content)
+    const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
+      type: 'oauth',
+      credentials: imported.credentials,
+      extra: imported.extra
+    })
+    appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
+    emit('reauthorized', updatedAccount)
+    handleClose()
+  } catch (error: any) {
     claudeOAuth.error.value =
-      error.response?.data?.detail || t('admin.accounts.oauth.cookieAuthFailed')
+      error instanceof ClaudeOAuthCredentialsError
+        ? t(`admin.accounts.oauth.claudeCredentialsErrors.${error.code}`)
+        : error.response?.data?.detail || t('admin.accounts.oauth.claudeCredentialsImportFailed')
+    appStore.showError(claudeOAuth.error.value)
   } finally {
     claudeOAuth.loading.value = false
   }

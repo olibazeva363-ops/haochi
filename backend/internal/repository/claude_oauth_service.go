@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/oauth"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
@@ -33,9 +34,14 @@ type claudeOAuthService struct {
 }
 
 func (s *claudeOAuthService) GetOrganizationUUID(ctx context.Context, sessionKey, proxyURL string) (string, error) {
+	cookies, err := parseClaudeSessionCookies(sessionKey)
+	if err != nil {
+		return "", err
+	}
+
 	client, err := s.clientFactory(proxyURL)
 	if err != nil {
-		return "", fmt.Errorf("create HTTP client: %w", err)
+		return "", claudeSessionRequestFailed("organization lookup", err)
 	}
 
 	var orgs []struct {
@@ -49,26 +55,26 @@ func (s *claudeOAuthService) GetOrganizationUUID(ctx context.Context, sessionKey
 
 	resp, err := client.R().
 		SetContext(ctx).
-		SetCookies(&http.Cookie{
-			Name:  "sessionKey",
-			Value: sessionKey,
-		}).
+		SetCookies(cookies...).
 		SetSuccessResult(&orgs).
 		Get(targetURL)
 
 	if err != nil {
 		logger.LegacyPrintf("repository.claude_oauth", "[OAuth] Step 1 FAILED - Request error: %v", err)
-		return "", fmt.Errorf("request failed: %w", err)
+		return "", claudeSessionRequestFailed("organization lookup", err)
 	}
 
 	logger.LegacyPrintf("repository.claude_oauth", "[OAuth] Step 1 Response - Status: %d", resp.StatusCode)
 
 	if !resp.IsSuccessState() {
-		return "", fmt.Errorf("failed to get organizations: status %d, body: %s", resp.StatusCode, resp.String())
+		return "", claudeSessionResponseError("organization lookup", resp.StatusCode)
 	}
 
 	if len(orgs) == 0 {
-		return "", fmt.Errorf("no organizations found")
+		return "", infraerrors.BadRequest(
+			"CLAUDE_SESSION_ORGANIZATION_MISSING",
+			"No Claude organization is available for this browser session.",
+		)
 	}
 
 	// 如果只有一个组织，直接使用
@@ -92,9 +98,14 @@ func (s *claudeOAuthService) GetOrganizationUUID(ctx context.Context, sessionKey
 }
 
 func (s *claudeOAuthService) GetAuthorizationCode(ctx context.Context, sessionKey, orgUUID, scope, codeChallenge, state, proxyURL string) (string, error) {
+	cookies, err := parseClaudeSessionCookies(sessionKey)
+	if err != nil {
+		return "", err
+	}
+
 	client, err := s.clientFactory(proxyURL)
 	if err != nil {
-		return "", fmt.Errorf("create HTTP client: %w", err)
+		return "", claudeSessionRequestFailed("authorization", err)
 	}
 
 	authURL := fmt.Sprintf("%s/v1/oauth/%s/authorize", s.baseURL, orgUUID)
@@ -120,10 +131,7 @@ func (s *claudeOAuthService) GetAuthorizationCode(ctx context.Context, sessionKe
 
 	resp, err := client.R().
 		SetContext(ctx).
-		SetCookies(&http.Cookie{
-			Name:  "sessionKey",
-			Value: sessionKey,
-		}).
+		SetCookies(cookies...).
 		SetHeader("Accept", "application/json").
 		SetHeader("Accept-Language", "en-US,en;q=0.9").
 		SetHeader("Cache-Control", "no-cache").
@@ -136,22 +144,22 @@ func (s *claudeOAuthService) GetAuthorizationCode(ctx context.Context, sessionKe
 
 	if err != nil {
 		logger.LegacyPrintf("repository.claude_oauth", "[OAuth] Step 2 FAILED - Request error: %v", err)
-		return "", fmt.Errorf("request failed: %w", err)
+		return "", claudeSessionRequestFailed("authorization", err)
 	}
 
 	logger.LegacyPrintf("repository.claude_oauth", "[OAuth] Step 2 Response - Status: %d, Body: %s", resp.StatusCode, logredact.RedactJSON(resp.Bytes()))
 
 	if !resp.IsSuccessState() {
-		return "", fmt.Errorf("failed to get authorization code: status %d, body: %s", resp.StatusCode, resp.String())
+		return "", claudeSessionResponseError("authorization", resp.StatusCode)
 	}
 
 	if result.RedirectURI == "" {
-		return "", fmt.Errorf("no redirect_uri in response")
+		return "", claudeSessionInvalidResponse("authorization response did not include redirect_uri")
 	}
 
 	parsedURL, err := url.Parse(result.RedirectURI)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse redirect_uri: %w", err)
+		return "", claudeSessionInvalidResponse("authorization response contained an invalid redirect_uri").WithCause(err)
 	}
 
 	queryParams := parsedURL.Query()
@@ -159,7 +167,13 @@ func (s *claudeOAuthService) GetAuthorizationCode(ctx context.Context, sessionKe
 	responseState := queryParams.Get("state")
 
 	if authCode == "" {
-		return "", fmt.Errorf("no authorization code in redirect_uri")
+		return "", claudeSessionInvalidResponse("authorization response did not include a code")
+	}
+	if responseState != "" && responseState != state {
+		return "", infraerrors.BadRequest(
+			"CLAUDE_SESSION_STATE_MISMATCH",
+			"Claude returned an OAuth state that does not match this authorization attempt.",
+		)
 	}
 
 	fullCode := authCode
@@ -169,6 +183,85 @@ func (s *claudeOAuthService) GetAuthorizationCode(ctx context.Context, sessionKe
 
 	logger.LegacyPrintf("repository.claude_oauth", "[OAuth] Step 2 SUCCESS - Got authorization code")
 	return fullCode, nil
+}
+
+func parseClaudeSessionCookies(input string) ([]*http.Cookie, error) {
+	raw := strings.TrimSpace(input)
+	if raw == "" || strings.ContainsAny(raw, "\r\n") {
+		return nil, invalidClaudeSessionCookieFormat()
+	}
+
+	if len(raw) >= len("cookie:") && strings.EqualFold(raw[:len("cookie:")], "cookie:") {
+		raw = strings.TrimSpace(raw[len("cookie:"):])
+	}
+
+	// Copying the Value column remains the common path. Header-style input is
+	// also accepted so Cloudflare cookies can accompany sessionKey when needed.
+	if !strings.Contains(raw, "=") || strings.HasPrefix(raw, "sk-ant-sid") {
+		value := strings.TrimSpace(strings.Trim(raw, `"`))
+		if value == "" {
+			return nil, invalidClaudeSessionCookieFormat()
+		}
+		return []*http.Cookie{{Name: "sessionKey", Value: value}}, nil
+	}
+
+	dummy := &http.Request{Header: make(http.Header)}
+	dummy.Header.Set("Cookie", raw)
+	cookies := dummy.Cookies()
+	foundSessionKey := false
+	for _, cookie := range cookies {
+		if strings.EqualFold(cookie.Name, "sessionKey") && strings.TrimSpace(cookie.Value) != "" {
+			cookie.Name = "sessionKey"
+			foundSessionKey = true
+		}
+	}
+	if !foundSessionKey {
+		return nil, invalidClaudeSessionCookieFormat()
+	}
+	return cookies, nil
+}
+
+func invalidClaudeSessionCookieFormat() error {
+	return infraerrors.BadRequest(
+		"CLAUDE_SESSION_COOKIE_FORMAT_INVALID",
+		"Paste the sessionKey value, sessionKey=VALUE, or a Cookie header containing sessionKey.",
+	)
+}
+
+func claudeSessionRequestFailed(stage string, cause error) error {
+	return infraerrors.ServiceUnavailable(
+		"CLAUDE_SESSION_REQUEST_FAILED",
+		"Claude browser-session "+stage+" failed. Check the account proxy and try again.",
+	).WithCause(cause)
+}
+
+func claudeSessionInvalidResponse(detail string) *infraerrors.ApplicationError {
+	return infraerrors.ServiceUnavailable(
+		"CLAUDE_SESSION_UPSTREAM_ERROR",
+		"Claude returned an invalid browser-session response.",
+	).WithCause(fmt.Errorf("%s", detail))
+}
+
+func claudeSessionResponseError(stage string, statusCode int) error {
+	switch statusCode {
+	case http.StatusUnauthorized:
+		// A 401 here belongs to Claude, not to the admin session. Keep it a 400
+		// so the frontend auth interceptor does not log the administrator out.
+		return infraerrors.BadRequest(
+			"CLAUDE_SESSION_COOKIE_INVALID",
+			"The Claude sessionKey is invalid or expired. Log in to claude.ai again and copy the latest value.",
+		)
+	case http.StatusForbidden:
+		return infraerrors.Forbidden(
+			"CLAUDE_SESSION_REQUEST_BLOCKED",
+			"Claude rejected the browser session. Use the same proxy exit as the browser, or paste the full Cookie header.",
+		)
+	default:
+		return infraerrors.ServiceUnavailable(
+			"CLAUDE_SESSION_UPSTREAM_ERROR",
+			fmt.Sprintf("Claude browser-session %s returned HTTP %d.", stage, statusCode),
+		)
+	}
 }
 
 func (s *claudeOAuthService) ExchangeCodeForToken(ctx context.Context, code, codeVerifier, state, proxyURL string, isSetupToken bool) (*oauth.TokenResponse, error) {

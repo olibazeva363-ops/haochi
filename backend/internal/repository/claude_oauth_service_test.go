@@ -37,12 +37,13 @@ func newTestReqClient(rt http.RoundTripper) *req.Client {
 
 func (s *ClaudeOAuthServiceSuite) TestGetOrganizationUUID() {
 	tests := []struct {
-		name       string
-		handler    http.HandlerFunc
-		wantErr    bool
-		errContain string
-		wantUUID   string
-		validate   func(captured requestCapture)
+		name         string
+		sessionInput string
+		handler      http.HandlerFunc
+		wantErr      bool
+		errContain   string
+		wantUUID     string
+		validate     func(captured requestCapture)
 	}{
 		{
 			name: "success",
@@ -59,13 +60,32 @@ func (s *ClaudeOAuthServiceSuite) TestGetOrganizationUUID() {
 			},
 		},
 		{
+			name:         "forwards full cookie header",
+			sessionInput: "sessionKey=sess; cf_clearance=clearance",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`[{"uuid":"org-1"}]`))
+			},
+			wantUUID: "org-1",
+			validate: func(captured requestCapture) {
+				cookies := make(map[string]string, len(captured.cookies))
+				for _, cookie := range captured.cookies {
+					cookies[cookie.Name] = cookie.Value
+				}
+				require.Equal(s.T(), map[string]string{
+					"sessionKey":   "sess",
+					"cf_clearance": "clearance",
+				}, cookies)
+			},
+		},
+		{
 			name: "non_200_returns_error",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte("unauthorized"))
 			},
 			wantErr:    true,
-			errContain: "401",
+			errContain: "CLAUDE_SESSION_COOKIE_INVALID",
 		},
 		{
 			name: "invalid_json_returns_error",
@@ -93,7 +113,11 @@ func (s *ClaudeOAuthServiceSuite) TestGetOrganizationUUID() {
 			s.client.baseURL = "http://in-process"
 			s.client.clientFactory = func(string) (*req.Client, error) { return newTestReqClient(rt), nil }
 
-			got, err := s.client.GetOrganizationUUID(context.Background(), "sess", "")
+			sessionInput := tt.sessionInput
+			if sessionInput == "" {
+				sessionInput = "sess"
+			}
+			got, err := s.client.GetOrganizationUUID(context.Background(), sessionInput, "")
 
 			if tt.wantErr {
 				require.Error(s.T(), err)
@@ -125,10 +149,10 @@ func (s *ClaudeOAuthServiceSuite) TestGetAuthorizationCode() {
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]string{
-					"redirect_uri": oauth.RedirectURI + "?code=AUTH&state=STATE",
+					"redirect_uri": oauth.RedirectURI + "?code=AUTH&state=st",
 				})
 			},
-			wantCode: "AUTH#STATE",
+			wantCode: "AUTH#st",
 			validate: func(captured requestCapture) {
 				require.True(s.T(), strings.HasPrefix(captured.path, "/v1/oauth/") && strings.HasSuffix(captured.path, "/authorize"), "unexpected path: %s", captured.path)
 				require.Equal(s.T(), http.MethodPost, captured.method, "expected POST")
@@ -146,6 +170,16 @@ func (s *ClaudeOAuthServiceSuite) TestGetAuthorizationCode() {
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]string{
 					"redirect_uri": oauth.RedirectURI + "?state=STATE", // no code
+				})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects_mismatched_state",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"redirect_uri": oauth.RedirectURI + "?code=AUTH&state=OTHER",
 				})
 			},
 			wantErr: true,
@@ -183,6 +217,56 @@ func (s *ClaudeOAuthServiceSuite) TestGetAuthorizationCode() {
 			if tt.validate != nil {
 				tt.validate(captured)
 			}
+		})
+	}
+}
+
+func TestParseClaudeSessionCookies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		input       string
+		wantCookies map[string]string
+		wantErr     bool
+	}{
+		{
+			name:        "raw session key",
+			input:       "sk-ant-sid02-value",
+			wantCookies: map[string]string{"sessionKey": "sk-ant-sid02-value"},
+		},
+		{
+			name:        "session key assignment",
+			input:       "sessionKey=sk-ant-sid01-value",
+			wantCookies: map[string]string{"sessionKey": "sk-ant-sid01-value"},
+		},
+		{
+			name:  "full cookie header",
+			input: "Cookie: sessionKey=sk-ant-sid02-value; cf_clearance=clearance; __cf_bm=bm",
+			wantCookies: map[string]string{
+				"sessionKey":   "sk-ant-sid02-value",
+				"cf_clearance": "clearance",
+				"__cf_bm":      "bm",
+			},
+		},
+		{name: "missing session key", input: "cf_clearance=clearance", wantErr: true},
+		{name: "empty quoted value", input: `""`, wantErr: true},
+		{name: "rejects multiline header", input: "sessionKey=value\r\nInjected: true", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cookies, err := parseClaudeSessionCookies(tt.input)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			got := make(map[string]string, len(cookies))
+			for _, cookie := range cookies {
+				got[cookie.Name] = cookie.Value
+			}
+			require.Equal(t, tt.wantCookies, got)
 		})
 	}
 }

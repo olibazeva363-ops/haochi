@@ -37,6 +37,17 @@
                 t('admin.accounts.oauth.cookieAutoAuth')
               }}</span>
             </label>
+            <label v-if="showClaudeCredentialsOption" class="flex cursor-pointer items-center gap-2">
+              <input
+                v-model="inputMethod"
+                type="radio"
+                value="claude_credentials"
+                class="text-blue-600 focus:ring-blue-500"
+              />
+              <span class="text-sm text-blue-900 dark:text-blue-200">{{
+                t('admin.accounts.oauth.claudeCredentialsAuth')
+              }}</span>
+            </label>
             <label v-if="showRefreshTokenOption" class="flex cursor-pointer items-center gap-2">
               <input
                 v-model="inputMethod"
@@ -439,6 +450,52 @@
           </div>
         </div>
 
+        <div v-if="inputMethod === 'claude_credentials'" class="space-y-4">
+          <div
+            class="rounded-lg border border-blue-300 bg-white/80 p-4 dark:border-blue-600 dark:bg-gray-800/80"
+          >
+            <div class="mb-4">
+              <label
+                class="mb-2 flex items-center gap-2 text-sm font-semibold text-gray-700 dark:text-gray-300"
+              >
+                <Icon name="key" size="sm" class="text-blue-500" />
+                {{ t('admin.accounts.oauth.claudeCredentialsLabel') }}
+              </label>
+              <textarea
+                v-model="claudeCredentialsInput"
+                rows="9"
+                class="input w-full resize-y font-mono text-sm"
+                :placeholder="t('admin.accounts.oauth.claudeCredentialsPlaceholder')"
+                autocomplete="off"
+                spellcheck="false"
+              ></textarea>
+            </div>
+
+            <div
+              v-if="error"
+              class="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-700 dark:bg-red-900/30"
+            >
+              <p class="whitespace-pre-line text-sm text-red-600 dark:text-red-400">
+                {{ error }}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              class="btn btn-primary w-full"
+              :disabled="loading || !claudeCredentialsInput.trim()"
+              @click="handleImportClaudeCredentials"
+            >
+              <Icon name="upload" size="sm" class="mr-2" />
+              {{
+                loading
+                  ? t('admin.accounts.oauth.verifying')
+                  : t('admin.accounts.oauth.claudeCredentialsImport')
+              }}
+            </button>
+          </div>
+        </div>
+
         <!-- Cookie Auto-Auth Form -->
         <div v-if="inputMethod === 'cookie'" class="space-y-4">
           <div
@@ -828,6 +885,7 @@ interface Props {
   allowMultiple?: boolean
   methodLabel?: string
   showCookieOption?: boolean // Whether to show cookie auto-auth option
+  showClaudeCredentialsOption?: boolean
   showRefreshTokenOption?: boolean // Whether to show refresh token input option (OpenAI only)
   showMobileRefreshTokenOption?: boolean // Whether to show mobile refresh token option (OpenAI only)
   showSessionTokenOption?: boolean
@@ -852,6 +910,7 @@ const props = withDefaults(defineProps<Props>(), {
   allowMultiple: false,
   methodLabel: 'Authorization Method',
   showCookieOption: true,
+  showClaudeCredentialsOption: false,
   showRefreshTokenOption: false,
   showMobileRefreshTokenOption: false,
   showSessionTokenOption: false,
@@ -870,6 +929,7 @@ const emit = defineEmits<{
   'generate-url': []
   'exchange-code': [code: string]
   'cookie-auth': [sessionKey: string]
+  'import-claude-credentials': [content: string]
   'validate-refresh-token': [refreshToken: string]
   'validate-mobile-refresh-token': [refreshToken: string]
   'validate-session-token': [sessionToken: string]
@@ -917,6 +977,7 @@ const inputMethod = ref<AuthInputMethod>(props.initialInputMethod)
 const isAgentIdentityInput = computed(() => inputMethod.value === 'agent_identity')
 const authCodeInput = ref('')
 const sessionKeyInput = ref('')
+const claudeCredentialsInput = ref('')
 const refreshTokenInput = ref('')
 const sessionTokenInput = ref('')
 const codexSessionInput = ref('')
@@ -930,6 +991,7 @@ const projectId = ref('')
 const methodOptionCount = computed(() => [
   props.showManualOption,
   props.showCookieOption,
+  props.showClaudeCredentialsOption,
   props.showRefreshTokenOption,
   props.showMobileRefreshTokenOption,
   props.showSessionTokenOption,
@@ -1042,6 +1104,12 @@ const handleCookieAuth = () => {
   }
 }
 
+const handleImportClaudeCredentials = () => {
+  if (claudeCredentialsInput.value.trim()) {
+    emit('import-claude-credentials', claudeCredentialsInput.value.trim())
+  }
+}
+
 const handleValidateRefreshToken = () => {
   if (refreshTokenInput.value.trim()) {
     if (inputMethod.value === 'mobile_refresh_token') {
@@ -1076,6 +1144,7 @@ defineExpose({
   oauthState,
   projectId,
   sessionKey: sessionKeyInput,
+  claudeCredentials: claudeCredentialsInput,
   refreshToken: refreshTokenInput,
   sessionToken: sessionTokenInput,
   codexSession: codexSessionInput,
@@ -1087,6 +1156,7 @@ defineExpose({
     oauthState.value = ''
     projectId.value = ''
     sessionKeyInput.value = ''
+    claudeCredentialsInput.value = ''
     refreshTokenInput.value = ''
     sessionTokenInput.value = ''
     codexSessionInput.value = ''
