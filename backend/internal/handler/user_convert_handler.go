@@ -15,7 +15,6 @@ import (
 )
 
 const (
-	defaultUserConvertURL       = "https://sub2api.in/api/user/convert"
 	envUserConvertURL           = "SUB2API_CONVERT_URL"
 	envUserConvertCookie        = "SUB2API_CONVERT_COOKIE"
 	envUserConvertUserAgent     = "SUB2API_CONVERT_USER_AGENT"
@@ -49,15 +48,16 @@ func (h *UserHandler) ConvertSK(c *gin.Context) {
 		return
 	}
 
+	upstreamURL := strings.TrimSpace(os.Getenv(envUserConvertURL))
+	if upstreamURL == "" {
+		response.Error(c, http.StatusServiceUnavailable, envUserConvertURL+" is not configured")
+		return
+	}
+
 	upstreamCookie := strings.TrimSpace(os.Getenv(envUserConvertCookie))
 	if upstreamCookie == "" {
 		response.Error(c, http.StatusServiceUnavailable, envUserConvertCookie+" is not configured")
 		return
-	}
-
-	upstreamURL := strings.TrimSpace(os.Getenv(envUserConvertURL))
-	if upstreamURL == "" {
-		upstreamURL = defaultUserConvertURL
 	}
 	parsedURL, err := url.Parse(upstreamURL)
 	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {

@@ -87,3 +87,20 @@ func TestUserConvertSKRequiresConfiguredUpstreamCookie(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
 	require.Contains(t, recorder.Body.String(), envUserConvertCookie)
 }
+
+func TestUserConvertSKRequiresConfiguredUpstreamURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Setenv(envUserConvertURL, "")
+	t.Setenv(envUserConvertCookie, "auth_token=token")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/user/convert", strings.NewReader(`{"sk":"sk-test"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	(&UserHandler{}).ConvertSK(c)
+
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Contains(t, recorder.Body.String(), envUserConvertURL)
+}

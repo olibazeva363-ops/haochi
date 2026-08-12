@@ -78,7 +78,7 @@ func (h *AccountHandler) ImportFromSK(c *gin.Context) {
 		cookie = service.ResolveConvertCookie(c.Request.Context())
 	}
 	if cookie == "" {
-		response.BadRequest(c, "converter cookie is required; set SUB2API_CONVERT_COOKIE or provide cookie")
+		response.BadRequest(c, "converter cookie is required; set SUB2API_CONVERT_URL and SUB2API_CONVERT_COOKIE or provide cookie")
 		return
 	}
 

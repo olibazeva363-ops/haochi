@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -25,12 +27,19 @@ type ConvertCookieStatus struct {
 	ExpiresAt int64  `json:"expires_at,omitempty"`
 	// HasAuthToken reports whether an auth_token segment was found in the cookie.
 	HasAuthToken bool `json:"has_auth_token"`
+	// ConvertURLConfigured reports whether SUB2API_CONVERT_URL is explicitly set.
+	ConvertURLConfigured bool `json:"convert_url_configured"`
+	// ConvertURLHost is the sanitized host of SUB2API_CONVERT_URL, never including path/query.
+	ConvertURLHost string `json:"convert_url_host,omitempty"`
+	// ConvertURLTrustedLocal reports whether the configured host is localhost/private/link-local.
+	ConvertURLTrustedLocal bool `json:"convert_url_trusted_local"`
 }
 
 // GetConvertCookieStatus resolves the effective converter cookie and returns a
 // sanitized status (never the raw cookie). DB setting wins over the env fallback.
 func (s *SettingService) GetConvertCookieStatus(ctx context.Context) ConvertCookieStatus {
 	status := ConvertCookieStatus{Source: "none"}
+	applyConvertURLStatus(&status)
 
 	var cookie string
 	if s.settingRepo != nil {
@@ -86,6 +95,41 @@ func (s *SettingService) ClearConvertCookie(ctx context.Context) (ConvertCookieS
 		s.onUpdate()
 	}
 	return s.GetConvertCookieStatus(ctx), nil
+}
+
+
+func applyConvertURLStatus(status *ConvertCookieStatus) {
+	if status == nil {
+		return
+	}
+	raw := strings.TrimSpace(os.Getenv("SUB2API_CONVERT_URL"))
+	if raw == "" {
+		return
+	}
+	status.ConvertURLConfigured = true
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return
+	}
+	host := parsed.Hostname()
+	status.ConvertURLHost = parsed.Host
+	status.ConvertURLTrustedLocal = isTrustedLocalConvertHost(host)
+}
+
+func isTrustedLocalConvertHost(host string) bool {
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if host == "" {
+		return false
+	}
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
 // parseConvertCookieIdentity best-effort extracts email / user_id / exp from the

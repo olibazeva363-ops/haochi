@@ -1518,6 +1518,9 @@ export interface ConvertCookieStatus {
   user_id?: string
   expires_at?: number
   has_auth_token: boolean
+  convert_url_configured: boolean
+  convert_url_host?: string
+  convert_url_trusted_local: boolean
 }
 
 export interface UpdateConvertCookieRequest {

@@ -80,6 +80,28 @@
               {{ t('admin.accounts.skConvertCookieSource') }}:
               {{ t(`admin.accounts.skConvertCookieSource_${convertCookieStatus.source}`) }}
             </div>
+            <div
+              class="mt-2 rounded p-2"
+              :class="convertCookieStatus.convert_url_configured
+                ? (convertCookieStatus.convert_url_trusted_local
+                  ? 'bg-green-100/70 text-green-800 dark:bg-green-900/30 dark:text-green-200'
+                  : 'bg-amber-100/70 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200')
+                : 'bg-blue-100/70 text-blue-800 dark:bg-blue-900/30 dark:text-blue-200'"
+            >
+              <div class="font-medium">{{ t('admin.accounts.skConvertURL') }}</div>
+              <div v-if="convertCookieStatus.convert_url_configured">
+                {{ t('admin.accounts.skConvertURLConfigured', { host: convertCookieStatus.convert_url_host || '-' }) }}
+              </div>
+              <div v-else>
+                {{ t('admin.accounts.skConvertURLNotConfigured') }}
+              </div>
+              <div v-if="convertCookieStatus.convert_url_configured && convertCookieStatus.convert_url_trusted_local" class="mt-1">
+                {{ t('admin.accounts.skConvertURLLocalTrusted') }}
+              </div>
+              <div v-else-if="convertCookieStatus.convert_url_configured" class="mt-1 font-medium">
+                {{ t('admin.accounts.skConvertURLRemoteWarning') }}
+              </div>
+            </div>
             <div v-if="convertCookieStatus.email || convertCookieStatus.user_id" class="mt-1 font-mono">
               {{ convertCookieStatus.email || '-' }}
               <span v-if="convertCookieStatus.user_id">(uid: {{ convertCookieStatus.user_id }})</span>
@@ -105,7 +127,7 @@
           <button
             class="btn btn-secondary btn-sm"
             type="button"
-            :disabled="importing || probing || skCount === 0"
+            :disabled="importing || probing || skCount === 0 || !canUseConverter"
             @click="handleProbe"
           >
             {{ probing ? '检测中...' : '检测接口/Cookie' }}
@@ -179,7 +201,7 @@
         <button class="btn btn-secondary" type="button" :disabled="importing || probing" @click="handleClose">
           {{ t('common.cancel') }}
         </button>
-        <button class="btn btn-primary" type="submit" form="import-sk-form" :disabled="importing || probing">
+        <button class="btn btn-primary" type="submit" form="import-sk-form" :disabled="importing || probing || !canUseConverter">
           {{ importing ? t('admin.accounts.skImporting') : t('admin.accounts.skImportButton') }}
         </button>
       </div>
@@ -228,6 +250,7 @@ const clearingCookie = ref(false)
 const skCount = computed(() => parseSKs(content.value).length)
 const errorItems = computed(() => result.value?.errors || [])
 const resultSummary = computed(() => toImportSummary(result.value))
+const canUseConverter = computed(() => Boolean(convertCookieStatus.value?.convert_url_configured))
 
 watch(
   () => props.show,
@@ -275,6 +298,10 @@ const handleImport = async () => {
     appStore.showError(t('admin.accounts.skImportMissingSK'))
     return
   }
+  if (!canUseConverter.value) {
+    appStore.showError(t('admin.accounts.skConvertURLNotConfigured'))
+    return
+  }
 
   importing.value = true
   try {
@@ -311,6 +338,10 @@ const handleProbe = async () => {
   const sks = parseSKs(content.value)
   if (sks.length === 0) {
     appStore.showError(t('admin.accounts.skImportMissingSK'))
+    return
+  }
+  if (!canUseConverter.value) {
+    appStore.showError(t('admin.accounts.skConvertURLNotConfigured'))
     return
   }
 

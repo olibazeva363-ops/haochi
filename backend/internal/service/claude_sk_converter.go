@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -22,7 +23,6 @@ const (
 	// SUB2API_CONVERT_COOKIE environment variable.
 	ConvertCookieSettingKey = "sub2api_convert_cookie"
 
-	defaultClaudeSKConvertURL     = "https://sub2api.in/api/user/convert"
 	defaultClaudeSKConvertTimeout = 15 * time.Second
 )
 
@@ -101,7 +101,7 @@ func (e *ClaudeSKConvertError) Error() string {
 		parts = append(parts, "body="+e.BodySnippet)
 	}
 	if e.NeedsCookieRefresh {
-		parts = append(parts, "action=update SUB2API_CONVERT_COOKIE or paste a fresh converter cookie")
+		parts = append(parts, "action=verify SUB2API_CONVERT_URL and update SUB2API_CONVERT_COOKIE or paste a fresh converter cookie")
 	}
 	return strings.Join(parts, "; ")
 }
@@ -137,7 +137,7 @@ func ConvertClaudeSKFromEnv(ctx context.Context, sk string) (ConvertedClaudeOAut
 	if cookie == "" {
 		return ConvertedClaudeOAuth{}, &ClaudeSKConvertError{
 			Kind:               ClaudeSKConvertKindConfiguration,
-			Message:            "converter cookie is required; set SUB2API_CONVERT_COOKIE",
+			Message:            "converter cookie is required; set SUB2API_CONVERT_URL and SUB2API_CONVERT_COOKIE",
 			Retryable:          false,
 			NeedsCookieRefresh: true,
 		}
@@ -158,7 +158,7 @@ func ConvertClaudeSK(ctx context.Context, sk, cookie string) (ConvertedClaudeOAu
 	if cookie == "" {
 		return ConvertedClaudeOAuth{}, &ClaudeSKConvertError{
 			Kind:               ClaudeSKConvertKindConfiguration,
-			Message:            "converter cookie is required",
+			Message:            "converter cookie is required; set SUB2API_CONVERT_URL and SUB2API_CONVERT_COOKIE",
 			Retryable:          false,
 			NeedsCookieRefresh: true,
 		}
@@ -166,7 +166,20 @@ func ConvertClaudeSK(ctx context.Context, sk, cookie string) (ConvertedClaudeOAu
 
 	convertURL := strings.TrimSpace(os.Getenv("SUB2API_CONVERT_URL"))
 	if convertURL == "" {
-		convertURL = defaultClaudeSKConvertURL
+		return ConvertedClaudeOAuth{}, &ClaudeSKConvertError{
+			Kind:               ClaudeSKConvertKindConfiguration,
+			Message:            "converter URL is required; set SUB2API_CONVERT_URL to your own trusted converter endpoint",
+			Retryable:          false,
+			NeedsCookieRefresh: true,
+		}
+	}
+	parsedConvertURL, err := url.Parse(convertURL)
+	if err != nil || parsedConvertURL.Scheme == "" || parsedConvertURL.Host == "" || (parsedConvertURL.Scheme != "http" && parsedConvertURL.Scheme != "https") {
+		return ConvertedClaudeOAuth{}, &ClaudeSKConvertError{
+			Kind:      ClaudeSKConvertKindConfiguration,
+			Message:   "converter URL is invalid; set SUB2API_CONVERT_URL to http(s)://HOST/PATH",
+			Retryable: false,
+		}
 	}
 	timeout := defaultClaudeSKConvertTimeout
 	if raw := strings.TrimSpace(os.Getenv("SUB2API_CONVERT_TIMEOUT_MS")); raw != "" {
@@ -176,7 +189,7 @@ func ConvertClaudeSK(ctx context.Context, sk, cookie string) (ConvertedClaudeOAu
 	}
 
 	body, _ := json.Marshal(map[string]string{"cookie": sk})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, convertURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parsedConvertURL.String(), bytes.NewReader(body))
 	if err != nil {
 		return ConvertedClaudeOAuth{}, err
 	}
@@ -184,8 +197,9 @@ func ConvertClaudeSK(ctx context.Context, sk, cookie string) (ConvertedClaudeOAu
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Cookie", cookie)
-	req.Header.Set("Origin", "https://sub2api.in")
-	req.Header.Set("Referer", "https://sub2api.in/dashboard/convert")
+	converterOrigin := parsedConvertURL.Scheme + "://" + parsedConvertURL.Host
+	req.Header.Set("Origin", converterOrigin)
+	req.Header.Set("Referer", converterOrigin+"/dashboard/convert")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36")
 
 	client := &http.Client{Timeout: timeout}
