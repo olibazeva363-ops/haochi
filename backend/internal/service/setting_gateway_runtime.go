@@ -644,12 +644,12 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 				metadataPassthrough:              false,
 				cchSigning:                       false,
 				claudeOAuthSystemPromptInjection: true,
-				anthropicCacheTTL1hInjection:     false,
+				anthropicCacheTTL1hInjection:     true,
 				rewriteMessageCacheControl:       s.defaultRewriteMessageCacheControl(),
 				clientDatelineNormalization:      true,
 				expiresAt:                        time.Now().Add(gatewayForwardingErrorTTL).UnixNano(),
 			})
-			return gatewayForwardingSettingsResult{fp: true, claudeOAuthSystemPromptInjection: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl(), clientDatelineNormalization: true}, nil
+			return gatewayForwardingSettingsResult{fp: true, claudeOAuthSystemPromptInjection: true, cacheTTL1h: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl(), clientDatelineNormalization: true}, nil
 		}
 		fp := true
 		if v, ok := values[SettingKeyEnableFingerprintUnification]; ok && v != "" {
@@ -663,7 +663,10 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 		}
 		systemPrompt := values[SettingKeyClaudeOAuthSystemPrompt]
 		systemPromptBlocks := values[SettingKeyClaudeOAuthSystemPromptBlocks]
-		cacheTTL1h := values[SettingKeyEnableAnthropicCacheTTL1hInjection] == "true"
+		cacheTTL1h := true
+		if v, ok := values[SettingKeyEnableAnthropicCacheTTL1hInjection]; ok && v != "" {
+			cacheTTL1h = v == "true"
+		}
 		rewriteMessageCacheControl := s.defaultRewriteMessageCacheControl()
 		if v, ok := values[SettingKeyRewriteMessageCacheControl]; ok && v != "" {
 			rewriteMessageCacheControl = v == "true"

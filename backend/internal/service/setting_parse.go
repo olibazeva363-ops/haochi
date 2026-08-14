@@ -222,7 +222,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyAllowUngroupedKeyScheduling:                        "false",
 		SettingKeyOpenAILowUpstreamRatePriorityEnabled:               "false",
 		SettingKeyOpenAIOAuthSchedulingRateMultiplier:                "1",
-		SettingKeyEnableAnthropicCacheTTL1hInjection:                 "false",
+		SettingKeyEnableAnthropicCacheTTL1hInjection:                 "true",
 		SettingKeyRewriteMessageCacheControl:                         strconv.FormatBool(s.defaultRewriteMessageCacheControl()),
 		SettingKeyEnableClientDatelineNormalization:                  "true",
 		SettingKeyAntigravityUserAgentVersion:                        "",
@@ -811,7 +811,10 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	}
 	result.ClaudeOAuthSystemPrompt = settings[SettingKeyClaudeOAuthSystemPrompt]
 	result.ClaudeOAuthSystemPromptBlocks = settings[SettingKeyClaudeOAuthSystemPromptBlocks]
-	result.EnableAnthropicCacheTTL1hInjection = settings[SettingKeyEnableAnthropicCacheTTL1hInjection] == "true"
+	result.EnableAnthropicCacheTTL1hInjection = true
+	if v, ok := settings[SettingKeyEnableAnthropicCacheTTL1hInjection]; ok && v != "" {
+		result.EnableAnthropicCacheTTL1hInjection = v == "true"
+	}
 	if v, ok := settings[SettingKeyRewriteMessageCacheControl]; ok && v != "" {
 		result.RewriteMessageCacheControl = v == "true"
 	} else {

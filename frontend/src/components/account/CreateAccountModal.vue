@@ -3999,7 +3999,7 @@ const umqModeOptions = computed(() => [
   { value: 'throttle', label: t('admin.accounts.quotaControl.rpmLimit.umqModeThrottle') },
   { value: 'serialize', label: t('admin.accounts.quotaControl.rpmLimit.umqModeSerialize') },
 ])
-const tlsFingerprintEnabled = ref(false)
+const tlsFingerprintEnabled = ref(true)
 const tlsFingerprintProfileId = ref<number | null>(null)
 const tlsFingerprintProfiles = ref<{ id: number; name: string }[]>([])
 const sessionIdMaskingEnabled = ref(false)
@@ -4736,7 +4736,7 @@ const resetForm = () => {
   rpmStrategy.value = 'tiered'
   rpmStickyBuffer.value = null
   userMsgQueueMode.value = ''
-  tlsFingerprintEnabled.value = false
+  tlsFingerprintEnabled.value = true
   tlsFingerprintProfileId.value = null
   sessionIdMaskingEnabled.value = false
   cacheTTLOverrideEnabled.value = false

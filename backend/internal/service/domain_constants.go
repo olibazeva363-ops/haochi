@@ -508,7 +508,8 @@ const (
 	SettingKeyClaudeOAuthSystemPrompt = "claude_oauth_system_prompt"
 	// SettingKeyClaudeOAuthSystemPromptBlocks Claude OAuth mimic 路径注入的 system blocks JSON 配置（空值使用内置默认）
 	SettingKeyClaudeOAuthSystemPromptBlocks = "claude_oauth_system_prompt_blocks"
-	// SettingKeyEnableAnthropicCacheTTL1hInjection 是否对 Anthropic OAuth/SetupToken 请求体注入 1h cache_control ttl（默认 false）
+	// SettingKeyEnableAnthropicCacheTTL1hInjection 是否对 Anthropic OAuth/SetupToken 请求体注入 1h cache_control ttl（默认 true：
+	// 真实 Claude Code CLI 使用 1h TTL，且 mimic beta 集合已声明 extended-cache-ttl，默认 5m 会造成 header/body 不一致）
 	SettingKeyEnableAnthropicCacheTTL1hInjection = "enable_anthropic_cache_ttl_1h_injection"
 	// SettingKeyEnableClientDatelineNormalization 是否对 Anthropic OAuth/SetupToken 账号
 	// 的 /v1/messages 请求体做客户端 dateline 归一化（默认 true）。

@@ -887,7 +887,7 @@ func TestAPIContracts(t *testing.T) {
 					"enable_claude_oauth_system_prompt_injection": true,
 					"claude_oauth_system_prompt": "",
 					"claude_oauth_system_prompt_blocks": "",
-					"enable_anthropic_cache_ttl_1h_injection": false,
+					"enable_anthropic_cache_ttl_1h_injection": true,
 					"rewrite_message_cache_control": false,
 					"enable_client_dateline_normalization": true,
 					"antigravity_user_agent_version": "",
@@ -1118,7 +1118,7 @@ func TestAPIContracts(t *testing.T) {
 					"google_oauth_client_secret_configured": false,
 					"google_oauth_redirect_url": "",
 					"google_oauth_frontend_redirect_url": "/auth/oauth/callback",
-					"site_name": "Sub2API",
+					"site_name": "TokenHub",
 					"site_logo": "",
 					"site_subtitle": "Subscription to API Conversion Platform",
 					"api_base_url": "",
@@ -1172,7 +1172,7 @@ func TestAPIContracts(t *testing.T) {
 					"enable_claude_oauth_system_prompt_injection": true,
 					"claude_oauth_system_prompt": "",
 					"claude_oauth_system_prompt_blocks": "",
-					"enable_anthropic_cache_ttl_1h_injection": false,
+					"enable_anthropic_cache_ttl_1h_injection": true,
 					"rewrite_message_cache_control": false,
 					"enable_client_dateline_normalization": true,
 					"antigravity_user_agent_version": "",
@@ -1789,6 +1789,10 @@ func (stubGroupRepo) CreateFromSource(ctx context.Context, group *service.Group,
 
 type stubAccountRepo struct {
 	bulkUpdateIDs []int64
+}
+
+func (s *stubAccountRepo) ListRateLimitedAccountsForProbe(ctx context.Context, platforms []string, minCooldownRemaining time.Duration, limit int) ([]service.Account, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (s *stubAccountRepo) Create(ctx context.Context, account *service.Account) error {
