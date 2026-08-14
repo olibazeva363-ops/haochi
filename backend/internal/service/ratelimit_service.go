@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/retryafter"
 	"github.com/tidwall/gjson"
 )
 
@@ -2204,21 +2205,7 @@ func openAIImageRateLimitResetAt(headers http.Header, body []byte) time.Time {
 }
 
 func parseRetryAfterResetTime(headers http.Header, now time.Time) *time.Time {
-	if headers == nil {
-		return nil
-	}
-	raw := strings.TrimSpace(headers.Get("Retry-After"))
-	if raw == "" {
-		return nil
-	}
-	if seconds, err := strconv.ParseFloat(raw, 64); err == nil {
-		resetAt := now.Add(time.Duration(seconds * float64(time.Second)))
-		return &resetAt
-	}
-	if parsed, err := http.ParseTime(raw); err == nil {
-		return &parsed
-	}
-	return nil
+	return retryafter.ParseResetTime(headers, now)
 }
 
 func parseOpenAIImageTryAgainCooldown(body []byte) time.Duration {
