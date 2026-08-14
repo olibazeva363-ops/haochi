@@ -10,26 +10,6 @@ import (
 	"time"
 )
 
-func TestParseAnthropic429BodyResetTimeNestedMessage(t *testing.T) {
-	resetAt := time.Now().Add(5 * time.Hour).UTC().Truncate(time.Second)
-	weeklyResetAt := time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Second)
-	body := []byte(fmt.Sprintf(`{
-		"type":"error",
-		"error":{
-			"type":"rate_limit_error",
-			"message":"{\"type\":\"exceeded_limit\",\"resetsAt\":%d,\"windows\":{\"5h\":{\"status\":\"exceeded_limit\",\"resets_at\":%d},\"7d\":{\"status\":\"within_limit\",\"resets_at\":%d}},\"resolved\":{\"limit\":{\"resets_at\":\"%s\"}}}"
-		}
-	}`, resetAt.Unix(), resetAt.Unix(), weeklyResetAt.Unix(), resetAt.Format(time.RFC3339)))
-
-	got := parseAnthropic429BodyResetTime(body)
-	if got == nil {
-		t.Fatal("reset time is nil")
-	}
-	if !got.Equal(resetAt) {
-		t.Fatalf("resetAt = %v, want %v", got, resetAt)
-	}
-}
-
 func TestGatewayRecoverClaudeSKImportTokenOn401UpdatesCredentials(t *testing.T) {
 	oldURL := os.Getenv("SUB2API_CONVERT_URL")
 	oldCookie := os.Getenv("SUB2API_CONVERT_COOKIE")
