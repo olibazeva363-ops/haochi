@@ -31,7 +31,7 @@ const maxFingerprintHeaderValueBytes = 256
 var defaultFingerprint = Fingerprint{
 	UserAgent:               "claude-cli/" + claude.CLICurrentVersion + " (external, cli)",
 	StainlessLang:           "js",
-	StainlessPackageVersion: "0.94.0",
+	StainlessPackageVersion: claude.SDKPackageVersion,
 	StainlessOS:             "Linux",
 	StainlessArch:           "arm64",
 	StainlessRuntime:        "node",

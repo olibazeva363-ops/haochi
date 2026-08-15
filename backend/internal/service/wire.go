@@ -641,6 +641,7 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 	svc.SetDefaultSubscriptionGroupReader(groupRepo)
 	svc.SetProxyRepository(proxyRepo)
 	SetConvertCookieProvider(settingRepo)
+	SetAnthropicDefaultBaseRPMProvider(settingRepo)
 	if err := svc.LoadForwardedClientIPSettings(context.Background()); err != nil {
 		logger.LegacyPrintf("service.setting", "Warning: load forwarded client IP settings failed: %v", err)
 	}

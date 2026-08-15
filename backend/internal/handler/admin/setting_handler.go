@@ -275,6 +275,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		ClaudeOAuthSystemPrompt:                                settings.ClaudeOAuthSystemPrompt,
 		ClaudeOAuthSystemPromptBlocks:                          settings.ClaudeOAuthSystemPromptBlocks,
 		EnableAnthropicCacheTTL1hInjection:                     settings.EnableAnthropicCacheTTL1hInjection,
+		AnthropicDefaultBaseRPM:                                settings.AnthropicDefaultBaseRPM,
 		RewriteMessageCacheControl:                             settings.RewriteMessageCacheControl,
 		EnableClientDatelineNormalization:                      settings.EnableClientDatelineNormalization,
 		AntigravityUserAgentVersion:                            settings.AntigravityUserAgentVersion,

@@ -511,6 +511,10 @@ const (
 	// SettingKeyEnableAnthropicCacheTTL1hInjection 是否对 Anthropic OAuth/SetupToken 请求体注入 1h cache_control ttl（默认 true：
 	// 真实 Claude Code CLI 使用 1h TTL，且 mimic beta 集合已声明 extended-cache-ttl，默认 5m 会造成 header/body 不一致）
 	SettingKeyEnableAnthropicCacheTTL1hInjection = "enable_anthropic_cache_ttl_1h_injection"
+	// SettingKeyAnthropicDefaultBaseRPM 未配置账号级 base_rpm 的 Anthropic OAuth/SetupToken
+	// 账号使用的默认 RPM 上限（默认 15；0 表示不启用默认限制）。防封角度：无节奏
+	// 约束的裸池会以匀速机器节奏打满上游，RPM 三区限制是最低限度的行为整形。
+	SettingKeyAnthropicDefaultBaseRPM = "anthropic_default_base_rpm"
 	// SettingKeyEnableClientDatelineNormalization 是否对 Anthropic OAuth/SetupToken 账号
 	// 的 /v1/messages 请求体做客户端 dateline 归一化（默认 true）。
 	// 归一化把 system prompt / <system-reminder> 块中 "Today's date is …" 语句里的

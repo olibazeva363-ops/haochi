@@ -223,6 +223,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyOpenAILowUpstreamRatePriorityEnabled:               "false",
 		SettingKeyOpenAIOAuthSchedulingRateMultiplier:                "1",
 		SettingKeyEnableAnthropicCacheTTL1hInjection:                 "true",
+		SettingKeyAnthropicDefaultBaseRPM:                            "15",
 		SettingKeyRewriteMessageCacheControl:                         strconv.FormatBool(s.defaultRewriteMessageCacheControl()),
 		SettingKeyEnableClientDatelineNormalization:                  "true",
 		SettingKeyAntigravityUserAgentVersion:                        "",
@@ -814,6 +815,12 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.EnableAnthropicCacheTTL1hInjection = true
 	if v, ok := settings[SettingKeyEnableAnthropicCacheTTL1hInjection]; ok && v != "" {
 		result.EnableAnthropicCacheTTL1hInjection = v == "true"
+	}
+	result.AnthropicDefaultBaseRPM = 15
+	if v, ok := settings[SettingKeyAnthropicDefaultBaseRPM]; ok && v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
+			result.AnthropicDefaultBaseRPM = n
+		}
 	}
 	if v, ok := settings[SettingKeyRewriteMessageCacheControl]; ok && v != "" {
 		result.RewriteMessageCacheControl = v == "true"

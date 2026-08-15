@@ -2649,15 +2649,23 @@ func (a *Account) GetSessionIdleTimeoutMinutes() int {
 
 // GetBaseRPM 获取基础 RPM 限制
 // 返回 0 表示未启用（负数视为无效配置，按 0 处理）
+//
+// Anthropic OAuth/SetupToken 账号在 extra.base_rpm 缺省时使用全局默认
+// （anthropic_default_base_rpm 设置，默认 15）：无节奏约束的裸池以匀速
+// 机器节奏打满上游是典型风控信号。显式 extra.base_rpm=0 可对单账号关闭。
 func (a *Account) GetBaseRPM() int {
-	if a.Extra == nil {
-		return 0
-	}
-	if v, ok := a.Extra["base_rpm"]; ok {
-		val := parseExtraInt(v)
-		if val > 0 {
-			return val
+	if a.Extra != nil {
+		if v, ok := a.Extra["base_rpm"]; ok {
+			val := parseExtraInt(v)
+			if val > 0 {
+				return val
+			}
+			// 显式 0（或无效值）：管理员明确不限制该账号
+			return 0
 		}
+	}
+	if a.IsAnthropicOAuthOrSetupToken() {
+		return anthropicDefaultBaseRPM()
 	}
 	return 0
 }

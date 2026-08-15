@@ -431,6 +431,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.EnableAnthropicCacheTTL1hInjection != after.EnableAnthropicCacheTTL1hInjection {
 		changed = append(changed, "enable_anthropic_cache_ttl_1h_injection")
 	}
+	if before.AnthropicDefaultBaseRPM != after.AnthropicDefaultBaseRPM {
+		changed = append(changed, "anthropic_default_base_rpm")
+	}
 	if before.RewriteMessageCacheControl != after.RewriteMessageCacheControl {
 		changed = append(changed, "rewrite_message_cache_control")
 	}

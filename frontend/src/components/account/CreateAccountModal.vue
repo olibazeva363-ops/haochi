@@ -3989,7 +3989,7 @@ const windowCostStickyReserve = ref<number | null>(null)
 const sessionLimitEnabled = ref(false)
 const maxSessions = ref<number | null>(null)
 const sessionIdleTimeout = ref<number | null>(null)
-const rpmLimitEnabled = ref(false)
+const rpmLimitEnabled = ref(true)
 const baseRpm = ref<number | null>(null)
 const rpmStrategy = ref<'tiered' | 'sticky_exempt'>('tiered')
 const rpmStickyBuffer = ref<number | null>(null)
@@ -4731,7 +4731,7 @@ const resetForm = () => {
   sessionLimitEnabled.value = false
   maxSessions.value = null
   sessionIdleTimeout.value = null
-  rpmLimitEnabled.value = false
+  rpmLimitEnabled.value = true
   baseRpm.value = null
   rpmStrategy.value = 'tiered'
   rpmStickyBuffer.value = null

@@ -95,6 +95,36 @@ func validateClaudeFrozenEnvironmentProfile(profile *ClaudeFrozenEnvironmentProf
 	return nil
 }
 
+// claudeEnvironmentPresets 是冻结档案创建时可用的 OS/arch 组合。
+// 防封角度：全部账号统一 Linux/arm64 会形成群体级统计画像（同一部署的账号
+// 在上游看来运行环境完全一致）。UA / node 运行时版本保持一致（与内置
+// Node.js 24.x TLS 指纹匹配），仅分散 OS/arch 维度--真实 CLI 用户群
+// 也主要是 Linux 与 macOS 的组合。
+var claudeEnvironmentPresets = []struct {
+	OS   string
+	Arch string
+}{
+	{"Linux", "arm64"},
+	{"Linux", "x64"},
+	{"Mac OS X", "arm64"},
+	{"Mac OS X", "x64"},
+}
+
+// claudeEnvironmentPresetForAccount 按账号确定性选择环境组合：同一账号永远
+// 得到同一画像（identity 派生自 account.ID/CreatedAt，与 device_id 同源），
+// 不同账号近似均匀分散。
+func claudeEnvironmentPresetForAccount(account *Account) (os string, arch string) {
+	preset := &claudeEnvironmentPresets[0]
+	if account != nil && account.ID > 0 {
+		seed := stableClaudeFrozenIdentity(account, "environment-preset")
+		// 取 SHA256 前 8 字符做模（避开低位规律）
+		if idx, err := strconv.ParseUint(seed[:8], 16, 64); err == nil {
+			preset = &claudeEnvironmentPresets[idx%uint64(len(claudeEnvironmentPresets))]
+		}
+	}
+	return preset.OS, preset.Arch
+}
+
 func newClaudeFrozenEnvironmentProfile(account *Account, tlsProfile *tlsfingerprint.Profile) *ClaudeFrozenEnvironmentProfile {
 	clientID := generateClientID()
 	deviceID := generateClientID()
@@ -102,6 +132,7 @@ func newClaudeFrozenEnvironmentProfile(account *Account, tlsProfile *tlsfingerpr
 		clientID = stableClaudeFrozenIdentity(account, "client")
 		deviceID = stableClaudeFrozenIdentity(account, "device")
 	}
+	presetOS, presetArch := claudeEnvironmentPresetForAccount(account)
 	profile := &ClaudeFrozenEnvironmentProfile{
 		Schema:                  claudeFrozenEnvironmentProfileSchema,
 		Source:                  "simulated",
@@ -110,8 +141,8 @@ func newClaudeFrozenEnvironmentProfile(account *Account, tlsProfile *tlsfingerpr
 		UserAgent:               defaultFingerprint.UserAgent,
 		StainlessLang:           defaultFingerprint.StainlessLang,
 		StainlessPackageVersion: defaultFingerprint.StainlessPackageVersion,
-		StainlessOS:             defaultFingerprint.StainlessOS,
-		StainlessArch:           defaultFingerprint.StainlessArch,
+		StainlessOS:             presetOS,
+		StainlessArch:           presetArch,
 		StainlessRuntime:        defaultFingerprint.StainlessRuntime,
 		StainlessRuntimeVersion: defaultFingerprint.StainlessRuntimeVersion,
 		BetaSet:                 append([]string(nil), claude.FullClaudeCodeMimicryBetas()...),

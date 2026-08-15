@@ -195,6 +195,9 @@ type SystemSettings struct {
 	ClaudeOAuthSystemPrompt                string `json:"claude_oauth_system_prompt"`
 	ClaudeOAuthSystemPromptBlocks          string `json:"claude_oauth_system_prompt_blocks"`
 	EnableAnthropicCacheTTL1hInjection     bool   `json:"enable_anthropic_cache_ttl_1h_injection"`
+	// AnthropicDefaultBaseRPM 是未配置账号级 base_rpm 的 Anthropic OAuth/SetupToken
+	// 账号使用的默认 RPM 上限；0 表示不启用默认限制。
+	AnthropicDefaultBaseRPM               int    `json:"anthropic_default_base_rpm"`
 	RewriteMessageCacheControl             bool   `json:"rewrite_message_cache_control"`
 	EnableClientDatelineNormalization      bool   `json:"enable_client_dateline_normalization"`
 	AntigravityUserAgentVersion            string `json:"antigravity_user_agent_version"`
