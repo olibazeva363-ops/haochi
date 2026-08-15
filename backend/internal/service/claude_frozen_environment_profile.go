@@ -403,6 +403,9 @@ func (s *GatewayService) finalizeClaudeFrozenMimicRequest(req *http.Request, pro
 	if authorization == "" {
 		return fmt.Errorf("finalize frozen Claude request: authorization is required")
 	}
+	// session 头由调用方从 body 的 metadata.user_id 派生（header/body 一致性），
+	// 重建 header 集时保留
+	sessionHeader := getHeaderRaw(req.Header, "x-claude-code-session-id")
 	req.Header = make(http.Header, 24)
 	setHeaderRaw(req.Header, "authorization", authorization)
 	setHeaderRaw(req.Header, "content-type", "application/json")
@@ -416,5 +419,8 @@ func (s *GatewayService) finalizeClaudeFrozenMimicRequest(req *http.Request, pro
 		setHeaderRaw(req.Header, "anthropic-beta", betaHeader)
 	}
 	deleteHeaderAllForms(req.Header, "traceparent")
+	if sessionHeader != "" {
+		setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", sessionHeader)
+	}
 	return nil
 }

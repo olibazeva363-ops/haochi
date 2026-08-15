@@ -203,8 +203,18 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		setHeaderRaw(req.Header, "anthropic-beta", finalBetaHeader)
 	}
 
-	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
-	if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" {
+	// 同步 X-Claude-Code-Session-Id 头，与 body 的 metadata.user_id.session_id 保持一致。
+	// 真实 CLI header 与 body 两处都带 session_id；只发 body 会形成 header/body 不对称。
+	// - mimic 路径：客户端 header 已被跳过，该头恒缺失，但 body 里有网关稳定派生的
+	//   session_id --无条件从 body 注入。
+	// - 透传路径（真实 CC 客户端）：客户端自带该头，用 body 值覆盖以对齐重写后的 metadata。
+	if tokenType == "oauth" && mimicClaudeCode {
+		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
+			if parsed := ParseMetadataUserID(uid); parsed != nil && parsed.SessionID != "" {
+				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
+			}
+		}
+	} else if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" {
 		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
 			if parsed := ParseMetadataUserID(uid); parsed != nil {
 				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
