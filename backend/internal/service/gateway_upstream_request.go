@@ -66,7 +66,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		} else {
 			frozenProfile = profile
 			fingerprint = profile.fingerprint()
-			s.observeClaudeFrozenTransport(account, profile)
+			s.observeClaudeFrozenTransport(ctx, account, profile)
 		}
 	}
 	if account.IsOAuth() && s.identityService != nil {

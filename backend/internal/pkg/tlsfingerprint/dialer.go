@@ -464,3 +464,13 @@ func toUint8s(vals []uint16) []uint8 {
 	}
 	return out
 }
+
+// Handshake performs the profile's TLS handshake over an already-established
+// plain connection (direct TCP or a proxy tunnel owned by the caller) and
+// returns the TLS connection. Intended for HTTP clients that manage their own
+// dialing/proxying (e.g. req.Client's SetTLSHandshake hook) but still want the
+// fingerprinted ClientHello. A nil profile uses the built-in Node.js 24.x
+// defaults, matching NewDialer semantics.
+func Handshake(ctx context.Context, conn net.Conn, profile *Profile, addr string) (net.Conn, error) {
+	return performTLSHandshake(ctx, conn, profile, addr)
+}

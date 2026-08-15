@@ -472,7 +472,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		} else {
 			frozenProfile = profile
 			ctFingerprint = profile.fingerprint()
-			s.observeClaudeFrozenTransport(account, profile)
+			s.observeClaudeFrozenTransport(ctx, account, profile)
 		}
 	}
 	if account.IsOAuth() && s.identityService != nil {

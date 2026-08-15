@@ -92,13 +92,20 @@ func (s *OAuthService) generateAuthURLWithScope(ctx context.Context, scope strin
 		return nil, fmt.Errorf("failed to generate session ID: %w", err)
 	}
 
-	// Get proxy URL if specified
+	// Get proxy URL if specified.
+	// Fail closed: a configured proxy that cannot be loaded must abort the flow,
+	// otherwise the request silently goes out from the server's own IP - an
+	// instant geo/fingerprint break for accounts that always use a proxy.
 	var proxyURL string
 	if proxyID != nil {
 		proxy, err := s.proxyRepo.GetByID(ctx, *proxyID)
-		if err == nil && proxy != nil {
-			proxyURL = proxy.URL()
+		if err != nil {
+			return nil, fmt.Errorf("failed to load proxy %d: %w", *proxyID, err)
 		}
+		if proxy == nil {
+			return nil, fmt.Errorf("proxy %d not found", *proxyID)
+		}
+		proxyURL = proxy.URL()
 	}
 
 	// Store session
@@ -152,9 +159,13 @@ func (s *OAuthService) ExchangeCode(ctx context.Context, input *ExchangeCodeInpu
 	proxyURL := session.ProxyURL
 	if input.ProxyID != nil {
 		proxy, err := s.proxyRepo.GetByID(ctx, *input.ProxyID)
-		if err == nil && proxy != nil {
-			proxyURL = proxy.URL()
+		if err != nil {
+			return nil, fmt.Errorf("failed to load proxy %d: %w", *input.ProxyID, err)
 		}
+		if proxy == nil {
+			return nil, fmt.Errorf("proxy %d not found", *input.ProxyID)
+		}
+		proxyURL = proxy.URL()
 	}
 
 	// Determine if this is a setup token (scope is inference only)
@@ -181,13 +192,17 @@ type CookieAuthInput struct {
 
 // CookieAuth performs OAuth using sessionKey (cookie-based auto-auth)
 func (s *OAuthService) CookieAuth(ctx context.Context, input *CookieAuthInput) (*TokenInfo, error) {
-	// Get proxy URL if specified
+	// Get proxy URL if specified (fail closed - see generateAuthURLWithScope)
 	var proxyURL string
 	if input.ProxyID != nil {
 		proxy, err := s.proxyRepo.GetByID(ctx, *input.ProxyID)
-		if err == nil && proxy != nil {
-			proxyURL = proxy.URL()
+		if err != nil {
+			return nil, fmt.Errorf("failed to load proxy %d: %w", *input.ProxyID, err)
 		}
+		if proxy == nil {
+			return nil, fmt.Errorf("proxy %d not found", *input.ProxyID)
+		}
+		proxyURL = proxy.URL()
 	}
 
 	// Determine scope and if this is a setup token
@@ -306,12 +321,19 @@ func (s *OAuthService) RefreshAccountToken(ctx context.Context, account *Account
 		return nil, fmt.Errorf("no refresh token available")
 	}
 
+	// Fail closed: an account bound to a proxy must not refresh its token from
+	// the server's own IP when the proxy lookup fails - the refresh endpoint
+	// sees an IP that never appears in the account's conversation traffic.
 	var proxyURL string
 	if account.ProxyID != nil {
 		proxy, err := s.proxyRepo.GetByID(ctx, *account.ProxyID)
-		if err == nil && proxy != nil {
-			proxyURL = proxy.URL()
+		if err != nil {
+			return nil, fmt.Errorf("failed to load proxy %d: %w", *account.ProxyID, err)
 		}
+		if proxy == nil {
+			return nil, fmt.Errorf("proxy %d not found", *account.ProxyID)
+		}
+		proxyURL = proxy.URL()
 	}
 
 	return s.RefreshToken(ctx, refreshToken, proxyURL)

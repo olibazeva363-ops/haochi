@@ -307,7 +307,13 @@ func tlsProfileForRequest(req *http.Request, fallback *tlsfingerprint.Profile) *
 	return fallback
 }
 
-func (s *GatewayService) observeClaudeFrozenTransport(account *Account, profile *ClaudeFrozenEnvironmentProfile) {
+// observeClaudeFrozenTransport 检测账号当前代理与冻结档案的不一致。
+// 处理策略：把档案的 proxy 记录更新为当前值（device/client 身份保持不变，
+// 等价于真实用户换了网络），同时将账号临时停调 10 分钟--既给上游一个
+// 干净的静默窗口，也阻断「同 device_id 在两个出口 IP 间快速振荡」的
+// 典型风控特征。身份由 stableClaudeFrozenIdentity 确定性派生，档案
+// 更新不会改变 device_id/client_id。
+func (s *GatewayService) observeClaudeFrozenTransport(ctx context.Context, account *Account, profile *ClaudeFrozenEnvironmentProfile) {
 	if account == nil || profile == nil {
 		return
 	}
@@ -320,12 +326,41 @@ func (s *GatewayService) observeClaudeFrozenTransport(account *Account, profile 
 		sum := sha256.Sum256([]byte(account.Proxy.URL()))
 		currentProxyFingerprint = hex.EncodeToString(sum[:])
 	}
-	if currentProxyID != profile.ProxyID || currentProxyFingerprint != profile.ProxyFingerprint {
-		slog.Warn("claude_frozen_environment_proxy_mismatch",
-			"account_id", account.ID,
-			"frozen_proxy_id", profile.ProxyID,
-			"current_proxy_id", currentProxyID,
-		)
+	if currentProxyID == profile.ProxyID && currentProxyFingerprint == profile.ProxyFingerprint {
+		return
+	}
+
+	slog.Warn("claude_frozen_environment_proxy_mismatch",
+		"account_id", account.ID,
+		"frozen_proxy_id", profile.ProxyID,
+		"current_proxy_id", currentProxyID,
+	)
+
+	profile.ProxyID = currentProxyID
+	profile.ProxyFingerprint = currentProxyFingerprint
+	s.claudeFrozenProfiles.Store(account.ID, profile)
+	if s.accountRepo != nil {
+		if err := s.accountRepo.UpdateExtra(context.WithoutCancel(ctx), account.ID, map[string]any{
+			claudeFrozenEnvironmentProfileExtraKey: profile,
+		}); err != nil {
+			slog.Warn("claude_frozen_environment_proxy_update_failed",
+				"account_id", account.ID,
+				"error", err,
+			)
+		}
+		until := time.Now().Add(10 * time.Minute)
+		reason := fmt.Sprintf("proxy changed (frozen proxy_id %d -> %d); account paused 10m to avoid IP oscillation", profile.ProxyID, currentProxyID)
+		if err := s.accountRepo.SetTempUnschedulable(context.WithoutCancel(ctx), account.ID, until, reason); err != nil {
+			slog.Warn("claude_frozen_environment_proxy_pause_failed",
+				"account_id", account.ID,
+				"error", err,
+			)
+		} else {
+			slog.Info("claude_frozen_environment_proxy_paused",
+				"account_id", account.ID,
+				"until", until.Format(time.RFC3339),
+			)
+		}
 	}
 }
 

@@ -7,12 +7,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/oauth"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
 
@@ -369,20 +367,3 @@ func (s *claudeOAuthService) RefreshToken(ctx context.Context, refreshToken, pro
 	return &tokenResp, nil
 }
 
-func createReqClient(proxyURL string) (*req.Client, error) {
-	// 禁用 CookieJar，确保每次授权都是干净的会话
-	client := req.C().
-		SetTimeout(60 * time.Second).
-		ImpersonateChrome().
-		SetCookieJar(nil) // 禁用 CookieJar
-
-	trimmed, _, err := proxyurl.Parse(proxyURL)
-	if err != nil {
-		return nil, err
-	}
-	if trimmed != "" {
-		client.SetProxyURL(trimmed)
-	}
-
-	return instrumentReqClient(client), nil
-}
