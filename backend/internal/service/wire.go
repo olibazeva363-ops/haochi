@@ -515,6 +515,19 @@ func ProvideRateLimitProbeRunnerService(
 	return svc
 }
 
+// ProvideUpstreamWarmupService creates and starts the upstream connection
+// warm-up loop (keeps per-account upstream pools hot to cut TTFT).
+func ProvideUpstreamWarmupService(
+	accountRepo AccountRepository,
+	httpUpstream HTTPUpstream,
+	tlsFP *TLSFingerprintProfileService,
+	cfg *config.Config,
+) *UpstreamWarmupService {
+	svc := NewUpstreamWarmupService(accountRepo, httpUpstream, tlsFP, cfg)
+	svc.Start()
+	return svc
+}
+
 // ProvideOpsScheduledReportService creates and starts OpsScheduledReportService.
 func ProvideOpsScheduledReportService(
 	opsService *OpsService,
@@ -791,6 +804,7 @@ var ProviderSet = wire.NewSet(
 	ProvideScheduledTestService,
 	ProvideScheduledTestRunnerService,
 	ProvideRateLimitProbeRunnerService,
+	ProvideUpstreamWarmupService,
 	NewGroupCapacityService,
 	NewChannelService,
 	NewModelPricingResolver,

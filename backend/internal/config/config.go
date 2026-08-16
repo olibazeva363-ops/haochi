@@ -880,7 +880,26 @@ const (
 )
 
 // GatewayConfig API网关相关配置
+// UpstreamWarmupConfig 控制上游连接预热行为。默认开启。
+type UpstreamWarmupConfig struct {
+	// 是否启用预热
+	Enabled bool `mapstructure:"enabled"`
+	// 预热扫描周期（秒）。应显著小于网关空闲连接超时（默认 90s），
+	// 保证任意时刻池内连接都不会因空闲而被回收。
+	IntervalSeconds int `mapstructure:"interval_seconds"`
+	// 单轮预热并发数
+	Concurrency int `mapstructure:"concurrency"`
+	// 单轮最多预热的账号数（0 表示不限）
+	MaxAccounts int `mapstructure:"max_accounts"`
+	// 参与预热的平台列表，默认 anthropic + openai
+	Platforms []string `mapstructure:"platforms"`
+}
+
 type GatewayConfig struct {
+	// UpstreamWarmup: 上游连接预热。定期为可调度账号向上游发免鉴权轻量请求，
+	// 让「账号+代理」连接池保持热连接，消除聊天间隔 > 空闲超时后的
+	// TCP+TLS+代理隧道握手对首字延迟（TTFT）的影响。
+	UpstreamWarmup UpstreamWarmupConfig `mapstructure:"upstream_warmup"`
 	// 等待上游响应头的超时时间（秒），0表示无超时
 	// 注意：这不影响流式数据传输，只控制等待响应头的时间
 	ResponseHeaderTimeout int `mapstructure:"response_header_timeout"`
@@ -2329,7 +2348,12 @@ func setDefaults() {
 	viper.SetDefault("gateway.max_idle_conns", 2560)          // 最大空闲连接总数（高并发场景可调大）
 	viper.SetDefault("gateway.max_idle_conns_per_host", 120)  // 每主机最大空闲连接（HTTP/2 场景默认）
 	viper.SetDefault("gateway.max_conns_per_host", 1024)      // 每主机最大连接数（含活跃；流式/HTTP1.1 场景可调大，如 2400+）
-	viper.SetDefault("gateway.idle_conn_timeout_seconds", 90) // 空闲连接超时（秒）
+	viper.SetDefault("gateway.idle_conn_timeout_seconds", 150) // 空闲连接超时（秒）；150 在 180 告警阈值内，配合预热进一步降低冷连接概率
+	viper.SetDefault("gateway.upstream_warmup.enabled", true)
+	viper.SetDefault("gateway.upstream_warmup.interval_seconds", 45)
+	viper.SetDefault("gateway.upstream_warmup.concurrency", 4)
+	viper.SetDefault("gateway.upstream_warmup.max_accounts", 200)
+	viper.SetDefault("gateway.upstream_warmup.platforms", []string{"anthropic", "openai"})
 	viper.SetDefault("gateway.max_upstream_clients", 5000)
 	viper.SetDefault("gateway.client_idle_ttl_seconds", 900)
 	viper.SetDefault("gateway.concurrency_slot_ttl_minutes", 30) // 并发槽位过期时间（支持超长请求）
