@@ -387,6 +387,12 @@ func TestOpenAIResponseFlush_FailedAndErrorEventsFlushAtBoundaries(t *testing.T)
 		require.Contains(t, flushes[1], "response.failed")
 	})
 
+	// c33c3208e 起，可 failover 的裸 error 帧（仅 message、无 code/type）不再被算作
+	// 客户端输出：一旦在其事件边界 flush，clientOutputStarted 会被固化，随后的
+	// response.failed 就永远进不了 pre-output failover。因此当这种 error 帧后面直接
+	// 跟随正常 [DONE] 收尾时，它与 [DONE] 会在终止边界合并为一次 flush——字节完全
+	// 一致、客户端照常收到两段事件、不误触 failover，只是少一次中途 flush。此处校验
+	// 「整段原样送达且不触发 failover」，而非旧的「按帧各 flush 一次」计数。
 	t.Run("error event", func(t *testing.T) {
 		body := "data: {\"type\":\"error\",\"error\":{\"message\":\"failed\"}}\n\n" +
 			"data: [DONE]\n\n"
@@ -398,7 +404,8 @@ func TestOpenAIResponseFlush_FailedAndErrorEventsFlushAtBoundaries(t *testing.T)
 		require.NotNil(t, result)
 		gotBody, flushes := recorder.snapshot()
 		require.Equal(t, body, gotBody)
-		require.Len(t, flushes, 2)
+		require.Len(t, flushes, 1)
+		require.Equal(t, body, flushes[0], "可 failover 的裸 error 帧与随后的 [DONE] 合并为终止边界的单次 flush")
 	})
 }
 
