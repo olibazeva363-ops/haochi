@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 )
 
 // upstreamWarmURL 返回账号预热用的上游 URL。
@@ -27,6 +28,21 @@ func upstreamWarmURL(account *Account) string {
 	default:
 		return ""
 	}
+}
+
+// warmupRecentUseWindow 只预热「最近使用过」的账号。
+// 预热的目标是让活跃会话的下一条消息命中热连接；从未使用或久未使用的账号
+// 不产生任何上游接触（新导入的号零流量时不应被网关反复触碰）。
+const warmupRecentUseWindow = 2 * time.Hour
+
+// warmupUserAgent 返回与账号流量画像一致的 UA。
+// TLS 指纹路径伪装 claude-cli，UA 必须同源；否则「Node TLS + Go-http-client UA」
+// 的组合本身就是矛盾的机器人指纹。
+func warmupUserAgent(account *Account) string {
+	if account.Platform == PlatformAnthropic && account.IsTLSFingerprintEnabled() {
+		return "claude-cli/" + claude.CLICurrentVersion + " (external, cli)"
+	}
+	return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 }
 
 // UpstreamWarmupService 定期为可调度账号预热上游连接。
@@ -126,12 +142,30 @@ func (s *UpstreamWarmupService) warmOnce(ctx context.Context) {
 		slog.Warn("upstream_warmup.list_failed", "error", err)
 		return
 	}
+
+	// 只预热最近使用过的账号；按账号加 ±40% 抖动决定本轮是否跳过，
+	// 打散固定节拍（固定 45s 整点脉冲是明显的机器节奏）。
+	now := time.Now()
+	eligible := make([]*Account, 0, len(accounts))
+	for i := range accounts {
+		account := &accounts[i]
+		if account.LastUsedAt == nil || now.Sub(*account.LastUsedAt) > warmupRecentUseWindow {
+			continue
+		}
+		if account.ID > 0 && s.jitterSkip(account.ID) {
+			continue
+		}
+		eligible = append(eligible, account)
+	}
+	if len(eligible) == 0 {
+		return
+	}
 	maxAccounts := 0
 	if s.cfg != nil {
 		maxAccounts = s.cfg.Gateway.UpstreamWarmup.MaxAccounts
 	}
-	if maxAccounts > 0 && len(accounts) > maxAccounts {
-		accounts = accounts[:maxAccounts]
+	if maxAccounts > 0 && len(eligible) > maxAccounts {
+		eligible = eligible[:maxAccounts]
 	}
 
 	concurrency := 4
@@ -140,9 +174,8 @@ func (s *UpstreamWarmupService) warmOnce(ctx context.Context) {
 	}
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
-	warmed, skipped := 0, 0
-	for i := range accounts {
-		account := &accounts[i]
+	warmed := 0
+	for _, account := range eligible {
 		url := upstreamWarmURL(account)
 		if url == "" {
 			continue
@@ -154,15 +187,24 @@ func (s *UpstreamWarmupService) warmOnce(ctx context.Context) {
 			defer func() { <-sem }()
 			if s.warmAccount(account, url) {
 				warmed++
-			} else {
-				skipped++
 			}
 		}()
 	}
 	wg.Wait()
-	if warmed > 0 || skipped > 0 {
-		slog.Debug("upstream_warmup.cycle_completed", "warmed", warmed, "skipped", skipped)
+	if warmed > 0 {
+		slog.Debug("upstream_warmup.cycle_completed", "warmed", warmed, "eligible", len(eligible))
 	}
+}
+
+// jitterSkip 以约 40% 概率跳过某账号本轮预热，由账号 ID + 当前分钟数决定，
+// 使每个账号的实际预热周期在 interval 的 0.6x-1.7x 之间随机浮动。
+func (s *UpstreamWarmupService) jitterSkip(accountID int64) bool {
+	seed := uint64(accountID)*2654435761 + uint64(time.Now().Unix()/60)
+	// xorshift64
+	seed ^= seed << 13
+	seed ^= seed >> 7
+	seed ^= seed << 17
+	return seed%10 < 4
 }
 
 func (s *UpstreamWarmupService) warmAccount(account *Account, url string) bool {
@@ -174,6 +216,7 @@ func (s *UpstreamWarmupService) warmAccount(account *Account, url string) bool {
 		return false
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", warmupUserAgent(account))
 
 	var resp *http.Response
 	proxyURL := ""
