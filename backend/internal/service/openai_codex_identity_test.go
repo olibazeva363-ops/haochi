@@ -76,14 +76,14 @@ func TestEnforceCodexIdentityHeaders(t *testing.T) {
 			name:           "第三方 UA 整体回退默认身份",
 			originator:     "opencode",
 			userAgent:      "luna/1.0.0",
-			wantOriginator: "codex_cli_rs",
-			wantUA:         codexCLIUserAgent,
+			wantOriginator: "codex-tui",
+			wantUA:         DefaultOpenAICodexUserAgent,
 		},
 		{
 			name:           "UA 缺失回退默认身份",
 			originator:     "codex_vscode",
-			wantOriginator: "codex_cli_rs",
-			wantUA:         codexCLIUserAgent,
+			wantOriginator: "codex-tui",
+			wantUA:         DefaultOpenAICodexUserAgent,
 		},
 		{
 			name:           "originator override UA 首段被尾部真实身份重写",

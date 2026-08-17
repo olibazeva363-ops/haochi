@@ -54,7 +54,14 @@ func enforceCodexIdentityHeaders(h http.Header) {
 	}
 	originator, pairedUA, ok := openai.PairCodexClientIdentity(h.Get("user-agent"))
 	if !ok {
-		originator, pairedUA = "codex_cli_rs", codexCLIUserAgent
+		// 兜底身份用 codex-tui / DefaultOpenAICodexUserAgent，是本 fork 相对上游的刻意分歧
+		// （issue #3901）：生产审计显示 codex-tui 是占比最高的真实 originator（约 5.3%），且
+		// DefaultOpenAICodexUserAgent 保留 codex-rs 引擎的完整尾部 `(name; version)` 结构，
+		// 比上游 codexCLIUserAgent（缺尾部括号组）更贴近真实流量指纹。改动兜底身份时，需
+		// 同步 openai_codex_identity_test.go / openai_compat_model_test.go /
+		// openai_gateway_service_test.go / openai_oauth_passthrough_test.go /
+		// openai_ws_forwarder_success_test.go 内的默认身份断言。
+		originator, pairedUA = "codex-tui", DefaultOpenAICodexUserAgent
 	}
 	h.Set("user-agent", pairedUA)
 	h.Set("originator", originator)

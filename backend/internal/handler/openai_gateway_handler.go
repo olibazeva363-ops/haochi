@@ -288,7 +288,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	if !ok {
 		return
 	}
-	nativeV2 := isBareOpenAIResponsesPath(c) && isOpenAIRemoteCompactionV2Request(body)
+	nativeV2 := isBareOpenAIResponsesPath(c) && isOpenAIRemoteCompactionV2Request(c, body)
 	if nativeV2 {
 		// 原生 v2 压缩出站前补注 x-codex-beta-features: remote_compaction_v2，
 		// 与真实 Codex 线型一致（网关链剥头后本级负责恢复，#5586）。

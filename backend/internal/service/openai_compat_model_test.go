@@ -1038,8 +1038,8 @@ func TestForwardAsAnthropic_OAuthRestoresCodexIdentityHeaders(t *testing.T) {
 			name:           "第三方UA回退为默认Codex身份",
 			userAgent:      "third-party-client/1.0.0",
 			originator:     "opencode",
-			wantUserAgent:  codexCLIUserAgent,
-			wantOriginator: "codex_cli_rs",
+			wantUserAgent:  DefaultOpenAICodexUserAgent,
+			wantOriginator: "codex-tui",
 		},
 	}
 
