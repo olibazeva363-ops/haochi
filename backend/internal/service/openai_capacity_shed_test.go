@@ -10,12 +10,7 @@ import (
 	"testing"
 	"time"
 
-<<<<<<< HEAD
-	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/gin-gonic/gin"
-=======
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
->>>>>>> dbb42881c (fix(openai): default OAuth identity to codex-tui)
 	"github.com/stretchr/testify/require"
 )
 
@@ -244,4 +239,16 @@ func TestSanitizeOpenAICapacityShedErrorCodeForClient(t *testing.T) {
 			}
 		})
 	}
+}
+
+// 出站身份的版本声明只能有一个来源：UA 的版本段、version 头、探针版本三处必须同源，
+// 各自硬编码会漂移成互相矛盾的身份，而自相矛盾或陈旧的身份会被上游优先降载。
+func TestCodexOutboundVersionHasSingleSource(t *testing.T) {
+	require.True(t,
+		strings.HasPrefix(codexCLIUserAgent, openai.CodexDefaultOriginator+"/"+codexCLIVersion+" "),
+		"codexCLIUserAgent=%q 必须以 codexCLIVersion=%q 作为版本段", codexCLIUserAgent, codexCLIVersion,
+	)
+	require.GreaterOrEqual(t, CompareVersions(codexCLIVersion, codexUpstreamMinVersion), 0,
+		"codexCLIVersion=%q 不得低于上游最低门槛 %q", codexCLIVersion, codexUpstreamMinVersion,
+	)
 }
