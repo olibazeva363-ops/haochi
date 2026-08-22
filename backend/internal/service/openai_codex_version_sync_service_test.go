@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -14,11 +15,12 @@ import (
 type codexVersionSyncSettingRepoStub struct {
 	SettingRepository // 嵌入接口，未实现的方法会 panic（不应被调用）
 
-	mu     sync.Mutex
-	values map[string]string
-	getErr error
-	setErr error
-	writes []string
+	mu        sync.Mutex
+	values    map[string]string
+	getErr    error
+	setErr    error
+	updatedAt time.Time
+	writes    []string
 }
 
 func newCodexVersionSyncSettingRepoStub(values map[string]string) *codexVersionSyncSettingRepoStub {

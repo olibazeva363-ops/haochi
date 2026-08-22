@@ -31,6 +31,18 @@ type stubOpenAIAccountRepo struct {
 	accounts []Account
 }
 
+type tempUnschedulableOpenAIAccountRepo struct {
+	stubOpenAIAccountRepo
+	modelRateLimitAccountID int64
+	modelRateLimitKey       string
+}
+
+func (r *tempUnschedulableOpenAIAccountRepo) SetModelRateLimit(_ context.Context, accountID int64, modelKey string, _ time.Time, _ ...string) error {
+	r.modelRateLimitAccountID = accountID
+	r.modelRateLimitKey = modelKey
+	return nil
+}
+
 type snapshotUpdateAccountRepo struct {
 	stubOpenAIAccountRepo
 	updateExtraCalls chan map[string]any
@@ -1521,7 +1533,7 @@ func TestOpenAIStreamingTerminalAndClientCancellationDoNotQuarantineProxy(t *tes
 		Body: &openAIStreamReadThenErrorCloser{
 			reader: strings.NewReader(strings.Join([]string{
 				"event: response.completed",
-				`data: {"type":"response.completed","response":{"status":"completed","output":[]}}`,
+				`data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}`,
 				"",
 			}, "\n")),
 			err: io.ErrUnexpectedEOF,
