@@ -112,6 +112,9 @@ func AdaptResponsesClientTools(req map[string]any) (ResponsesClientToolMapping, 
 			lowered = append(lowered, raw)
 		}
 	}
+	if stripResponsesDeferredToolFlags(lowered) {
+		changed = true
+	}
 	if changed {
 		req["tools"] = lowered
 	}
@@ -128,6 +131,80 @@ func AdaptResponsesClientTools(req map[string]any) (ResponsesClientToolMapping, 
 		adapter.NamespaceTools = nil
 	}
 	return adapter, changed, nil
+}
+
+// stripResponsesDeferredToolFlags removes defer_loading only when the final
+// declaration list no longer contains the built-in tool_search it requires.
+func hasResponsesToolSearchDeclaration(tools []any) bool {
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if ok && strings.TrimSpace(stringValue(tool["type"])) == "tool_search" {
+			return true
+		}
+	}
+	return false
+}
+
+func stripResponsesDeferredToolFlags(tools []any) bool {
+	if hasResponsesToolSearchDeclaration(tools) {
+		return false
+	}
+	changed := false
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, exists := tool["defer_loading"]; exists {
+			delete(tool, "defer_loading")
+			changed = true
+		}
+	}
+	return changed
+}
+
+// AdaptResponsesClientToolsWithInheritedMapping lowers client-tool history on
+// a follow-up request that omits the session-level tools declaration. An
+// explicitly present tools field, including an empty or malformed value,
+// always replaces the inherited mapping and is handled by the ordinary
+// declaration-driven adapter.
+func AdaptResponsesClientToolsWithInheritedMapping(
+	req map[string]any,
+	inherited ResponsesClientToolMapping,
+	inheritedLoweredTools ...[]any,
+) (ResponsesClientToolMapping, bool, error) {
+	if req == nil {
+		return ResponsesClientToolMapping{}, false, nil
+	}
+	if _, toolsPresent := req["tools"]; toolsPresent {
+		return AdaptResponsesClientTools(req)
+	}
+	if len(inherited.CustomTools) == 0 && !inherited.ToolSearch && len(inherited.NamespaceTools) == 0 {
+		return ResponsesClientToolMapping{}, false, nil
+	}
+	if len(inheritedLoweredTools) > 0 && len(inheritedLoweredTools[0]) > 0 {
+		req["tools"] = restoreInheritedResponsesClientToolDeclarations(inheritedLoweredTools[0], inherited)
+		return AdaptResponsesClientTools(req)
+	}
+
+	changed, err := rewriteClientToolHistory(req["input"], &inherited)
+	if err != nil {
+		return ResponsesClientToolMapping{}, false, err
+	}
+	if len(inherited.NamespaceTools) > 0 {
+		before := changed
+		rewriteNamespaceQualifiedCalls(req["input"], inherited.NamespaceTools)
+		// Namespace rewriting does not currently report whether it changed a
+		// value. A retained namespace mapping is only used for follow-up
+		// history, so conservatively rebuild the request when input exists.
+		if _, inputPresent := req["input"]; inputPresent && !before {
+			changed = true
+		}
+	}
+	if rewriteClientToolChoice(req, &inherited) {
+		changed = true
+	}
+	return inherited, changed, nil
 }
 
 func copyClientTool(tool map[string]any) map[string]any {
