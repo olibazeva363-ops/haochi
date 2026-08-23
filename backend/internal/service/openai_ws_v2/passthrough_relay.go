@@ -30,9 +30,12 @@ type Usage struct {
 }
 
 type RelayResult struct {
-	RequestModel            string
-	ResponseModel           string
-	ResponseModelConflict   bool
+	RequestModel          string
+	ResponseModel         string
+	ResponseModelConflict bool
+	// ResponseServiceTier is the raw service_tier declared by the last terminal
+	// response event; "" when the upstream never declared one.
+	ResponseServiceTier     string
 	Usage                   Usage
 	RequestID               string
 	TerminalEventType       string
@@ -47,6 +50,7 @@ type RelayTurnResult struct {
 	RequestModel          string
 	ResponseModel         string
 	ResponseModelConflict bool
+	ResponseServiceTier   string
 	Usage                 Usage
 	RequestID             string
 	TerminalEventType     string
@@ -90,16 +94,20 @@ type RelayTraceEvent struct {
 }
 
 type relayState struct {
-	usage             Usage
-	requestModelMu    sync.RWMutex
-	requestModel      string
-	lastResponseID    string
-	lastResponseModel string
-	responseConflict  bool
-	terminalEventType string
-	firstTokenMs      *int
-	turnTimingByID    map[string]*relayTurnTiming
-	activeTurn        *relayTurnTiming
+	usage                   Usage
+	turnUsage               Usage
+	requestModelMu          sync.RWMutex
+	requestModel            string
+	pendingTurnStart        atomic.Pointer[time.Time]
+	lastResponseID          string
+	lastResponseModel       string
+	lastResponseServiceTier string
+	responseConflict        bool
+	terminalEventType       string
+	firstTokenMs            *int
+	turnTimingByID          map[string]*relayTurnTiming
+	activeTurn              *relayTurnTiming
+	pendingBareError        *observedUpstreamEvent
 }
 
 type relayExitSignal struct {
@@ -110,14 +118,16 @@ type relayExitSignal struct {
 }
 
 type observedUpstreamEvent struct {
-	terminal         bool
-	eventType        string
-	responseID       string
-	usage            Usage
-	responseModel    string
-	responseConflict bool
-	duration         time.Duration
-	firstToken       *int
+	terminal            bool
+	eventType           string
+	responseID          string
+	usage               Usage
+	startedAt           time.Time
+	responseModel       string
+	responseConflict    bool
+	responseServiceTier string
+	duration            time.Duration
+	firstToken          *int
 }
 
 type relayTurnTiming struct {
@@ -126,6 +136,9 @@ type relayTurnTiming struct {
 	firstResponseModel    string
 	terminalResponseModel string
 	responseModelConflict bool
+	// terminalResponseServiceTier is only taken from terminal events: earlier
+	// events echo the requested tier, not the one the upstream actually used.
+	terminalResponseServiceTier string
 }
 
 func Relay(
@@ -711,6 +724,58 @@ func observeUpstreamMessage(
 	if !isTerminalEvent(eventType) {
 		return observed
 	}
+	observeRelayTurnResponseServiceTier(turnTiming, firstRelayResponseServiceTier(message))
+	state.terminalEventType = eventType
+	if eventType == "error" {
+		// Some Responses servers emit error immediately before response.failed.
+		// Defer turn settlement so the authoritative failed usage can replace
+		// this fallback instead of billing both terminal frames.
+		if observed.responseID == "" {
+			observed.responseID = openAIWSRelayActiveTurnID(state)
+		}
+		pending := observed
+		state.pendingBareError = &pending
+		return observed
+	}
+	state.pendingBareError = nil
+	return finalizeObservedRelayTerminal(state, observed, now)
+}
+
+func shouldFinalizePendingBareError(state *relayState, payload []byte, eventType string) bool {
+	if state == nil || state.pendingBareError == nil {
+		return false
+	}
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" || eventType == "error" || eventType == "response.failed" {
+		return false
+	}
+	if isTerminalEvent(eventType) || eventType == "response.created" {
+		return true
+	}
+	// Auxiliary provider frames may be interleaved between error and its
+	// authoritative response.failed. Only a response event identifying a
+	// different turn closes the pending error.
+	responseID := strings.TrimSpace(gjson.GetBytes(payload, "response.id").String())
+	if responseID == "" || state.pendingBareError.responseID == "" {
+		return false
+	}
+	return responseID != state.pendingBareError.responseID
+}
+
+func finalizePendingBareError(state *relayState, now time.Time) observedUpstreamEvent {
+	if state == nil || state.pendingBareError == nil {
+		return observedUpstreamEvent{}
+	}
+	observed := *state.pendingBareError
+	state.pendingBareError = nil
+	return finalizeObservedRelayTerminal(state, observed, now)
+}
+
+func finalizeObservedRelayTerminal(state *relayState, observed observedUpstreamEvent, now time.Time) observedUpstreamEvent {
+	if state == nil || strings.TrimSpace(observed.eventType) == "" {
+		return observedUpstreamEvent{}
+	}
+	observed.usage = finalizeRelayTurnUsage(state)
 	observed.terminal = true
 	state.terminalEventType = eventType
 	if responseID != "" {
@@ -718,8 +783,10 @@ func observeUpstreamMessage(
 		if turnTiming, ok := openAIWSRelayDeleteTurnTiming(state, responseID); ok {
 			observed.responseModel = relayTurnResponseModel(&turnTiming)
 			observed.responseConflict = turnTiming.responseModelConflict
+			observed.responseServiceTier = turnTiming.terminalResponseServiceTier
 			state.lastResponseModel = observed.responseModel
 			state.responseConflict = observed.responseConflict
+			state.lastResponseServiceTier = observed.responseServiceTier
 			duration := now.Sub(turnTiming.startAt)
 			if duration < 0 {
 				duration = 0
@@ -751,6 +818,7 @@ func emitTurnComplete(
 		RequestModel:          requestModel,
 		ResponseModel:         observed.responseModel,
 		ResponseModelConflict: observed.responseConflict,
+		ResponseServiceTier:   observed.responseServiceTier,
 		Usage:                 observed.usage,
 		RequestID:             responseID,
 		TerminalEventType:     observed.eventType,
@@ -804,6 +872,31 @@ func relayTurnResponseModel(turn *relayTurnTiming) string {
 		return turn.terminalResponseModel
 	}
 	return turn.firstResponseModel
+}
+
+func firstRelayResponseServiceTier(message []byte) string {
+	if len(message) == 0 {
+		return ""
+	}
+	values := gjson.GetManyBytes(message, "response.service_tier", "service_tier")
+	for _, value := range values {
+		if value.Type != gjson.String {
+			continue
+		}
+		if tier := strings.TrimSpace(value.String()); tier != "" {
+			return tier
+		}
+	}
+	return ""
+}
+
+func observeRelayTurnResponseServiceTier(turn *relayTurnTiming, tier string) {
+	if turn == nil {
+		return
+	}
+	if tier = strings.TrimSpace(tier); tier != "" {
+		turn.terminalResponseServiceTier = tier
+	}
 }
 
 func openAIWSRelayGetOrInitTurnTiming(state *relayState, responseID string, now time.Time) *relayTurnTiming {
@@ -958,6 +1051,7 @@ func enrichResult(result *RelayResult, state *relayState, duration time.Duration
 	result.RequestModel = state.currentRequestModel()
 	result.ResponseModel = state.lastResponseModel
 	result.ResponseModelConflict = state.responseConflict
+	result.ResponseServiceTier = state.lastResponseServiceTier
 	result.Usage = state.usage
 	result.RequestID = state.lastResponseID
 	result.TerminalEventType = state.terminalEventType
