@@ -112,6 +112,119 @@ func openAIResponsesRejectedNamespaceIndex(param string) (int, bool) {
 	return 0, false
 }
 
+// removeOpenAIResponsesRejectedStatusAtIndex drops the status field the
+// upstream rejected, and the status of every other input item sharing the
+// rejected item's type.
+//
+// The upstream names one offending index per response, but a replayed
+// conversation routinely carries dozens of items of the same type, each with a
+// status its schema does not accept. Clearing one index per round trip would
+// need one retry per item and exhaust the bounded retry budget long before the
+// request could succeed. Items of other types keep their status: the rejection
+// only proves that this type has no status field.
+func removeOpenAIResponsesRejectedStatusAtIndex(body []byte, index int) ([]byte, string, bool, error) {
+	itemPath := fmt.Sprintf("input.%d", index)
+	rejected := gjson.GetBytes(body, itemPath)
+	if !rejected.IsObject() {
+		return nil, "", false, nil
+	}
+	if !gjson.GetBytes(body, itemPath+".status").Exists() {
+		return nil, "", false, nil
+	}
+
+	retryBody := body
+	cleared := 0
+	rejectedType := strings.TrimSpace(rejected.Get("type").String())
+	if input := gjson.GetBytes(body, "input"); rejectedType != "" && input.IsArray() {
+		// Deleting a field never shifts array indexes, so positions read from
+		// the original body stay valid against the rewritten one.
+		for itemIndex, item := range input.Array() {
+			if !item.IsObject() || strings.TrimSpace(item.Get("type").String()) != rejectedType {
+				continue
+			}
+			statusPath := fmt.Sprintf("input.%d.status", itemIndex)
+			if !gjson.GetBytes(retryBody, statusPath).Exists() {
+				continue
+			}
+			next, err := sjson.DeleteBytes(retryBody, statusPath)
+			if err != nil {
+				return nil, "", false, fmt.Errorf("delete rejected status at input[%d]: %w", itemIndex, err)
+			}
+			retryBody = next
+			cleared++
+		}
+	}
+	if cleared == 0 {
+		// The rejected item carries no type to match on; fall back to clearing
+		// just the index the upstream named.
+		next, err := sjson.DeleteBytes(retryBody, itemPath+".status")
+		if err != nil {
+			return nil, "", false, fmt.Errorf("delete rejected status at input[%d]: %w", index, err)
+		}
+		retryBody = next
+	}
+	return retryBody, "indexed status parameter rejection", true, nil
+}
+
+func removeOpenAIResponsesRejectedCacheAtIndex(body []byte, index int) ([]byte, string, bool, error) {
+	itemPath := fmt.Sprintf("input.%d", index)
+	if !gjson.GetBytes(body, itemPath).IsObject() {
+		return nil, "", false, nil
+	}
+	cachePath := itemPath + ".prompt_cache_breakpoint"
+	if !gjson.GetBytes(body, cachePath).Exists() {
+		return nil, "", false, nil
+	}
+	retryBody, err := sjson.DeleteBytes(body, cachePath)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("delete rejected prompt_cache_breakpoint at input[%d]: %w", index, err)
+	}
+	return retryBody, "indexed prompt_cache_breakpoint parameter rejection", true, nil
+}
+
+func normalizeOpenAIResponsesRejectedNullContentAtIndex(body []byte, index int) ([]byte, string, bool, error) {
+	itemPath := fmt.Sprintf("input.%d", index)
+	item := gjson.GetBytes(body, itemPath)
+	content := gjson.GetBytes(body, itemPath+".content")
+	if !item.IsObject() || !content.Exists() || content.Type != gjson.Null {
+		return nil, "", false, nil
+	}
+
+	itemType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+	role := strings.TrimSpace(item.Get("role").String())
+	contentPath := itemPath + ".content"
+	switch {
+	case itemType == "reasoning":
+		retryBody, err := sjson.DeleteBytes(body, contentPath)
+		if err != nil {
+			return nil, "", false, fmt.Errorf("delete rejected null content at input[%d]: %w", index, err)
+		}
+		return retryBody, "indexed reasoning null content rejection", true, nil
+	case itemType == "message" || role != "":
+		retryBody, err := sjson.SetBytes(body, contentPath, "")
+		if err != nil {
+			return nil, "", false, fmt.Errorf("normalize rejected null content at input[%d]: %w", index, err)
+		}
+		return retryBody, "indexed message null content rejection", true, nil
+	default:
+		return nil, "", false, nil
+	}
+}
+
+func removeOpenAIResponsesRejectedReasoningContentAtIndex(body []byte, index int) ([]byte, string, bool, error) {
+	itemPath := fmt.Sprintf("input.%d", index)
+	item := gjson.GetBytes(body, itemPath)
+	content := item.Get("content")
+	if !item.IsObject() || strings.TrimSpace(item.Get("type").String()) != "reasoning" || !content.IsArray() || len(content.Array()) == 0 {
+		return nil, "", false, nil
+	}
+	retryBody, err := sjson.DeleteBytes(body, itemPath+".content")
+	if err != nil {
+		return nil, "", false, fmt.Errorf("delete rejected reasoning content at input[%d]: %w", index, err)
+	}
+	return retryBody, "indexed reasoning content maximum-length rejection", true, nil
+}
+
 func removeOpenAIResponsesRejectedNamespaceAtIndex(body []byte, index int) ([]byte, string, bool, error) {
 	itemPath := fmt.Sprintf("input.%d", index)
 	itemType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, itemPath+".type").String()))
