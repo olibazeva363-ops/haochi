@@ -290,6 +290,105 @@ func newOpenAIUpstreamFailoverError(
 	return failoverErr
 }
 
+func (s *OpenAIGatewayService) newOpenAIAccountFailoverError(
+	account *Account,
+	statusCode int,
+	responseHeaders http.Header,
+	responseBody []byte,
+	upstreamMsg string,
+	shouldDisable bool,
+	retryableOnSameAccount bool,
+) *UpstreamFailoverError {
+	return s.newOpenAIAccountFailoverErrorWithClassificationHeaders(account, statusCode, responseHeaders, responseHeaders, responseBody, upstreamMsg, shouldDisable, retryableOnSameAccount)
+}
+
+func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHeaders(
+	account *Account,
+	statusCode int,
+	responseHeaders http.Header,
+	classificationHeaders http.Header,
+	responseBody []byte,
+	upstreamMsg string,
+	shouldDisable bool,
+	retryableOnSameAccount bool,
+) *UpstreamFailoverError {
+	oauth429Retry := s.shouldRetryOpenAIOAuth429OnSameAccountWithResponse(account, statusCode, shouldDisable, classificationHeaders, responseBody)
+	failoverErr := newOpenAIUpstreamFailoverError(
+		statusCode,
+		responseHeaders,
+		responseBody,
+		upstreamMsg,
+		retryableOnSameAccount || oauth429Retry,
+	)
+	if oauth429Retry {
+		failoverErr.SameAccountRetryDeadline = s.openAIOAuth429RetryDeadline(account)
+		failoverErr.SameAccountRetryDelay = openAIOAuth429SameAccountRetryDelay(responseHeaders, failoverErr.SameAccountRetryDeadline)
+	}
+	return failoverErr
+}
+
+const (
+	openAIUpstreamAccessUnavailableClientMessage = "Upstream access is temporarily unavailable, please retry later"
+	// OpenAIUpstreamAccessStateReason marks a provider credential whose
+	// account, workspace, or organization is unavailable.
+	OpenAIUpstreamAccessStateReason = GatewayFailureReason("openai_upstream_access_state")
+	// OpenAIHTTPContinuationUnsupportedReason identifies accounts that cannot
+	// preserve an official Responses HTTP continuation without dropping state.
+	OpenAIHTTPContinuationUnsupportedReason = GatewayFailureReason("openai_http_continuation_unsupported")
+)
+
+// isOpenAIUpstreamAccessStateError recognizes provider-side credential state
+// failures only from explicit structured codes. Free-form messages may contain
+// echoed user input, including inside stream terminal error.message fields.
+func isOpenAIUpstreamAccessStateError(_ string, body []byte) bool {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return false
+	}
+	for _, path := range []string{"error.code", "response.error.code", "detail.code", "code"} {
+		if isOpenAIUpstreamAccessStateCode(gjson.GetBytes(body, path).String()) {
+			return true
+		}
+	}
+	return false
+}
+
+func isOpenAIUpstreamAccessStateCode(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "deactivated_workspace" {
+		return true
+	}
+	for _, subject := range []string{"workspace", "account", "organization", "org"} {
+		for _, state := range []string{"deactivated", "disabled", "suspended"} {
+			if value == subject+"_"+state || value == state+"_"+subject {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isOpenAIHTTPUpstreamAccessStateError is deliberately status-independent:
+// known provider codes are durable evidence, while 401/403 messages without
+// such a code must flow through the existing authentication/403 policies.
+func isOpenAIHTTPUpstreamAccessStateError(_ int, _ string, body []byte) bool {
+	return isOpenAIUpstreamAccessStateError("", body)
+}
+
+func openAICapacityShedClientMessage(upstreamMsg string, body []byte) string {
+	for _, candidate := range []string{
+		upstreamMsg,
+		gjson.GetBytes(body, "error.message").String(),
+		gjson.GetBytes(body, "response.error.message").String(),
+		gjson.GetBytes(body, "message").String(),
+	} {
+		candidate = sanitizeUpstreamErrorMessage(strings.TrimSpace(candidate))
+		if candidate != "" && isOpenAICapacityShedMessage(candidate) {
+			return candidate
+		}
+	}
+	return "Upstream service is temporarily overloaded, please retry later"
+}
+
 // IsOpenAIRequestBodyTooLarge reports whether another account may accept the
 // same request even though the selected account rejected its serialized size.
 func (e *UpstreamFailoverError) IsOpenAIRequestBodyTooLarge() bool {
