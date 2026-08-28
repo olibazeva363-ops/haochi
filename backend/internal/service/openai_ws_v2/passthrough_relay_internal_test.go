@@ -307,6 +307,7 @@ func TestParseUsageAndEnrichCoverage(t *testing.T) {
 	require.Equal(t, 0, state.usage.CacheReadInputTokens)
 
 	parseUsageAndAccumulate(state, []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":1,"input_tokens_details":{"cached_tokens":1,"cache_write_tokens":4},"output_tokens_details":{"image_tokens":3}}}}`), "response.completed", nil)
+	finalizeRelayTurnUsage(state)
 	require.Equal(t, 2, state.usage.InputTokens)
 	require.Equal(t, 1, state.usage.OutputTokens)
 	require.Equal(t, 1, state.usage.CacheReadInputTokens)
@@ -334,6 +335,7 @@ func TestParseUsageAndAccumulateAcceptsChatUsageAliases(t *testing.T) {
 		"response.done",
 		nil,
 	)
+	finalizeRelayTurnUsage(state)
 	require.Equal(t, 12, got.InputTokens)
 	require.Equal(t, 6, got.OutputTokens)
 	require.Equal(t, 4, got.CacheReadInputTokens)

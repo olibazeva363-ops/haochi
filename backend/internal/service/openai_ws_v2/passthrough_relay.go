@@ -777,7 +777,7 @@ func finalizeObservedRelayTerminal(state *relayState, observed observedUpstreamE
 	}
 	observed.usage = finalizeRelayTurnUsage(state)
 	observed.terminal = true
-	state.terminalEventType = eventType
+	responseID := strings.TrimSpace(observed.responseID)
 	if responseID != "" {
 		state.lastResponseID = responseID
 		if turnTiming, ok := openAIWSRelayDeleteTurnTiming(state, responseID); ok {
@@ -791,9 +791,13 @@ func finalizeObservedRelayTerminal(state *relayState, observed observedUpstreamE
 			if duration < 0 {
 				duration = 0
 			}
+			observed.startedAt = turnTiming.startAt
 			observed.duration = duration
 			observed.firstToken = openAIWSRelayCloneIntPtr(turnTiming.firstTokenMs)
 		}
+	} else {
+		state.consumePendingTurnStartedAt()
+		openAIWSRelayDiscardActiveTurnTiming(state)
 	}
 	return observed
 }
@@ -997,12 +1001,42 @@ func parseUsageAndAccumulate(
 		ImageOutputTokens:        int(imageTokens),
 	}
 
-	state.usage.InputTokens += parsedUsage.InputTokens
-	state.usage.OutputTokens += parsedUsage.OutputTokens
-	state.usage.CacheCreationInputTokens += parsedUsage.CacheCreationInputTokens
-	state.usage.CacheReadInputTokens += parsedUsage.CacheReadInputTokens
-	state.usage.ImageOutputTokens += parsedUsage.ImageOutputTokens
+	if isTerminalEvent(strings.TrimSpace(eventType)) {
+		if relayUsageHasTokens(parsedUsage) || !relayUsageHasTokens(state.turnUsage) {
+			state.turnUsage = parsedUsage
+		}
+	} else {
+		mergeRelayUsageNonZero(&state.turnUsage, parsedUsage)
+		return Usage{}
+	}
 	return parsedUsage
+}
+
+func relayUsageHasTokens(usage Usage) bool {
+	return usage.InputTokens > 0 || usage.OutputTokens > 0 ||
+		usage.CacheCreationInputTokens > 0 || usage.CacheReadInputTokens > 0 ||
+		usage.ImageOutputTokens > 0
+}
+
+func mergeRelayUsageNonZero(dst *Usage, src Usage) {
+	if dst == nil {
+		return
+	}
+	if src.InputTokens > 0 {
+		dst.InputTokens = src.InputTokens
+	}
+	if src.OutputTokens > 0 {
+		dst.OutputTokens = src.OutputTokens
+	}
+	if src.CacheCreationInputTokens > 0 {
+		dst.CacheCreationInputTokens = src.CacheCreationInputTokens
+	}
+	if src.CacheReadInputTokens > 0 {
+		dst.CacheReadInputTokens = src.CacheReadInputTokens
+	}
+	if src.ImageOutputTokens > 0 {
+		dst.ImageOutputTokens = src.ImageOutputTokens
+	}
 }
 
 func parseUsageIntField(value gjson.Result, required bool) (int, bool) {
@@ -1159,4 +1193,54 @@ func waitRelayExit(exitCh <-chan relayExitSignal, timeout time.Duration) (relayE
 	case <-time.After(timeout):
 		return relayExitSignal{}, false
 	}
+}
+
+func openAIWSRelayActiveTurnID(state *relayState) string {
+	if state == nil || state.activeTurn == nil {
+		return ""
+	}
+	for responseID, timing := range state.turnTimingByID {
+		if timing == state.activeTurn {
+			return responseID
+		}
+	}
+	return ""
+}
+
+func openAIWSRelayDiscardActiveTurnTiming(state *relayState) {
+	if state == nil || state.activeTurn == nil {
+		return
+	}
+	active := state.activeTurn
+	for responseID, timing := range state.turnTimingByID {
+		if timing == active {
+			delete(state.turnTimingByID, responseID)
+		}
+	}
+	state.activeTurn = nil
+}
+
+func finalizeRelayTurnUsage(state *relayState) Usage {
+	if state == nil {
+		return Usage{}
+	}
+	turnUsage := state.turnUsage
+	state.usage.InputTokens += turnUsage.InputTokens
+	state.usage.OutputTokens += turnUsage.OutputTokens
+	state.usage.CacheCreationInputTokens += turnUsage.CacheCreationInputTokens
+	state.usage.CacheReadInputTokens += turnUsage.CacheReadInputTokens
+	state.usage.ImageOutputTokens += turnUsage.ImageOutputTokens
+	state.turnUsage = Usage{}
+	return turnUsage
+}
+
+func (s *relayState) consumePendingTurnStartedAt() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	startedAt := s.pendingTurnStart.Swap(nil)
+	if startedAt == nil {
+		return time.Time{}
+	}
+	return *startedAt
 }

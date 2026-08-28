@@ -2,6 +2,13 @@ package service
 
 import "strings"
 
+func optionalStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
 func optionalTrimmedStringPtr(raw string) *string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
