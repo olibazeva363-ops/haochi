@@ -16,6 +16,7 @@ const maxOpenAIResponsesRejectedFieldRetries = 6
 
 var (
 	openAIResponsesRejectedNamespaceParamPattern = regexp.MustCompile(`(?i)^input\[(\d+)\]\.namespace$`)
+	openAIResponsesRejectedStatusParamPattern    = regexp.MustCompile(`(?i)^input\[(\d+)\]\.status$`)
 	openAIResponsesRejectedMessageParamPattern   = regexp.MustCompile(`(?i)(?:unknown|unsupported)[ _-]+parameter\s*(?::|=|is)?\s*["']?(max_output_tokens|input\[\d+\]\.namespace)(?:["']|\b)`)
 )
 
@@ -73,6 +74,9 @@ func normalizeOpenAIResponsesRejectedFieldRetryBody(statusCode int, body, respon
 	if index, ok := openAIResponsesRejectedNamespaceIndex(param); ok {
 		return removeOpenAIResponsesRejectedNamespaceAtIndex(body, index)
 	}
+	if index, ok := openAIResponsesRejectedStatusIndex(param); ok {
+		return removeOpenAIResponsesRejectedStatusAtIndex(body, index)
+	}
 	if param == "max_output_tokens" && gjson.GetBytes(body, "max_output_tokens").Exists() {
 		retryBody, err := sjson.DeleteBytes(body, "max_output_tokens")
 		if err != nil {
@@ -110,6 +114,22 @@ func openAIResponsesRejectedNamespaceIndex(param string) (int, bool) {
 		return index, true
 	}
 	return 0, false
+}
+
+func openAIResponsesRejectedInputIndex(pattern *regexp.Regexp, param string) (int, bool) {
+	match := pattern.FindStringSubmatch(strings.TrimSpace(param))
+	if len(match) != 2 {
+		return 0, false
+	}
+	index, err := strconv.Atoi(match[1])
+	if err == nil && index >= 0 {
+		return index, true
+	}
+	return 0, false
+}
+
+func openAIResponsesRejectedStatusIndex(param string) (int, bool) {
+	return openAIResponsesRejectedInputIndex(openAIResponsesRejectedStatusParamPattern, param)
 }
 
 // removeOpenAIResponsesRejectedStatusAtIndex drops the status field the
