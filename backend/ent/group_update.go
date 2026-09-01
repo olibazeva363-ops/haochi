@@ -969,6 +969,20 @@ func (_u *GroupUpdate) SetNillableMaxReasoningEffort(v *string) *GroupUpdate {
 	return _u
 }
 
+// SetMaxReasoningEffortOverLimit sets the "max_reasoning_effort_over_limit" field.
+func (_u *GroupUpdate) SetMaxReasoningEffortOverLimit(v string) *GroupUpdate {
+	_u.mutation.SetMaxReasoningEffortOverLimit(v)
+	return _u
+}
+
+// SetNillableMaxReasoningEffortOverLimit sets the "max_reasoning_effort_over_limit" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableMaxReasoningEffortOverLimit(v *string) *GroupUpdate {
+	if v != nil {
+		_u.SetMaxReasoningEffortOverLimit(*v)
+	}
+	return _u
+}
+
 // SetReasoningEffortMappings sets the "reasoning_effort_mappings" field.
 func (_u *GroupUpdate) SetReasoningEffortMappings(v []domain.ReasoningEffortMapping) *GroupUpdate {
 	_u.mutation.SetReasoningEffortMappings(v)
@@ -1342,6 +1356,11 @@ func (_u *GroupUpdate) check() error {
 			return &ValidationError{Name: "max_reasoning_effort", err: fmt.Errorf(`ent: validator failed for field "Group.max_reasoning_effort": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.MaxReasoningEffortOverLimit(); ok {
+		if err := group.MaxReasoningEffortOverLimitValidator(v); err != nil {
+			return &ValidationError{Name: "max_reasoning_effort_over_limit", err: fmt.Errorf(`ent: validator failed for field "Group.max_reasoning_effort_over_limit": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -1625,6 +1644,9 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.MaxReasoningEffort(); ok {
 		_spec.SetField(group.FieldMaxReasoningEffort, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.MaxReasoningEffortOverLimit(); ok {
+		_spec.SetField(group.FieldMaxReasoningEffortOverLimit, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.ReasoningEffortMappings(); ok {
 		_spec.SetField(group.FieldReasoningEffortMappings, field.TypeJSON, value)
@@ -2896,6 +2918,20 @@ func (_u *GroupUpdateOne) SetNillableMaxReasoningEffort(v *string) *GroupUpdateO
 	return _u
 }
 
+// SetMaxReasoningEffortOverLimit sets the "max_reasoning_effort_over_limit" field.
+func (_u *GroupUpdateOne) SetMaxReasoningEffortOverLimit(v string) *GroupUpdateOne {
+	_u.mutation.SetMaxReasoningEffortOverLimit(v)
+	return _u
+}
+
+// SetNillableMaxReasoningEffortOverLimit sets the "max_reasoning_effort_over_limit" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableMaxReasoningEffortOverLimit(v *string) *GroupUpdateOne {
+	if v != nil {
+		_u.SetMaxReasoningEffortOverLimit(*v)
+	}
+	return _u
+}
+
 // SetReasoningEffortMappings sets the "reasoning_effort_mappings" field.
 func (_u *GroupUpdateOne) SetReasoningEffortMappings(v []domain.ReasoningEffortMapping) *GroupUpdateOne {
 	_u.mutation.SetReasoningEffortMappings(v)
@@ -3282,6 +3318,11 @@ func (_u *GroupUpdateOne) check() error {
 			return &ValidationError{Name: "max_reasoning_effort", err: fmt.Errorf(`ent: validator failed for field "Group.max_reasoning_effort": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.MaxReasoningEffortOverLimit(); ok {
+		if err := group.MaxReasoningEffortOverLimitValidator(v); err != nil {
+			return &ValidationError{Name: "max_reasoning_effort_over_limit", err: fmt.Errorf(`ent: validator failed for field "Group.max_reasoning_effort_over_limit": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -3582,6 +3623,9 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if value, ok := _u.mutation.MaxReasoningEffort(); ok {
 		_spec.SetField(group.FieldMaxReasoningEffort, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.MaxReasoningEffortOverLimit(); ok {
+		_spec.SetField(group.FieldMaxReasoningEffortOverLimit, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.ReasoningEffortMappings(); ok {
 		_spec.SetField(group.FieldReasoningEffortMappings, field.TypeJSON, value)
