@@ -35,11 +35,11 @@ func (s *AntigravityGatewayService) observeAntigravityGeminiSSELine(c *gin.Conte
 	if payload == "" || payload == "[DONE]" {
 		return
 	}
-	raw := []byte(payload)
-	if inner, err := s.unwrapV1InternalResponse(raw); err == nil && len(inner) > 0 {
-		raw = inner
-	}
-	observer.ObserveGemini(raw)
+	// Observe the original payload: ObserveGemini supports both the v1internal
+	// wrapper and direct Gemini response shapes. The main stream handler will
+	// unwrap the same line for business processing, so unwrapping here would be
+	// duplicate work on every SSE event.
+	observer.ObserveGemini([]byte(payload))
 }
 
 // antigravityClientWriter 封装流式响应的客户端写入，自动检测断开并标记。
@@ -695,6 +695,8 @@ func (s *AntigravityGatewayService) writeMappedClaudeError(c *gin.Context, accou
 	upstreamDetail := s.getUpstreamErrorDetail(body)
 	setOpsUpstreamError(c, upstreamStatus, upstreamMsg, upstreamDetail)
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+		ProxyID:            opsUpstreamProxyID(account),
+		ProxyName:          opsUpstreamProxyName(account),
 		Platform:           account.Platform,
 		AccountID:          account.ID,
 		AccountName:        account.Name,

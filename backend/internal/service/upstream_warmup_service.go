@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -40,7 +41,7 @@ const warmupRecentUseWindow = 2 * time.Hour
 // 的组合本身就是矛盾的机器人指纹。
 func warmupUserAgent(account *Account) string {
 	if account.Platform == PlatformAnthropic && account.IsTLSFingerprintEnabled() {
-		return "claude-cli/" + claude.CLICurrentVersion + " (external, cli)"
+		return "claude-cli/" + claude.CLIVersion() + " (external, cli)"
 	}
 	return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 }
@@ -58,8 +59,10 @@ type UpstreamWarmupService struct {
 	httpUpstream HTTPUpstream
 	tlsFP        *TLSFingerprintProfileService
 	cfg          *config.Config
-	stopCh       chan struct{}
-	stopOnce     sync.Once
+	lifecycleMu  sync.Mutex
+	cancel       context.CancelFunc
+	started      bool
+	stopped      bool
 	wg           sync.WaitGroup
 }
 
@@ -74,7 +77,6 @@ func NewUpstreamWarmupService(
 		httpUpstream: httpUpstream,
 		tlsFP:        tlsFP,
 		cfg:          cfg,
-		stopCh:       make(chan struct{}),
 	}
 }
 
@@ -87,18 +89,28 @@ func (s *UpstreamWarmupService) Start() {
 	if interval < 10*time.Second {
 		interval = 45 * time.Second
 	}
+	s.lifecycleMu.Lock()
+	if s.started || s.stopped {
+		s.lifecycleMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	s.started = true
+	// Register the loop before Stop can wait, including concurrent Start/Stop.
 	s.wg.Add(1)
+	s.lifecycleMu.Unlock()
 	go func() {
 		defer s.wg.Done()
 		// 启动即预热一轮，缩短重启后的冷启动窗口
-		s.warmOnce(context.Background())
+		s.warmOnce(ctx)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				s.warmOnce(context.Background())
-			case <-s.stopCh:
+				s.warmOnce(ctx)
+			case <-ctx.Done():
 				return
 			}
 		}
@@ -113,7 +125,12 @@ func (s *UpstreamWarmupService) Stop() {
 	if s == nil {
 		return
 	}
-	s.stopOnce.Do(func() { close(s.stopCh) })
+	s.lifecycleMu.Lock()
+	s.stopped = true
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.lifecycleMu.Unlock()
 	s.wg.Wait()
 }
 
@@ -124,9 +141,9 @@ func (s *UpstreamWarmupService) platforms() []string {
 	return []string{PlatformAnthropic, PlatformOpenAI}
 }
 
-func (s *UpstreamWarmupService) warmOnce(ctx context.Context) {
-	if s.accountRepo == nil || s.httpUpstream == nil {
-		return
+func (s *UpstreamWarmupService) warmOnce(ctx context.Context) int {
+	if ctx.Err() != nil || s.accountRepo == nil || s.httpUpstream == nil {
+		return 0
 	}
 	platforms := make([]string, 0, len(s.platforms()))
 	for _, p := range s.platforms() {
@@ -135,12 +152,12 @@ func (s *UpstreamWarmupService) warmOnce(ctx context.Context) {
 		}
 	}
 	if len(platforms) == 0 {
-		return
+		return 0
 	}
 	accounts, err := s.accountRepo.ListSchedulableByPlatforms(ctx, platforms)
 	if err != nil {
 		slog.Warn("upstream_warmup.list_failed", "error", err)
-		return
+		return 0
 	}
 
 	// 只预热最近使用过的账号；按账号加 ±40% 抖动决定本轮是否跳过，
@@ -158,7 +175,7 @@ func (s *UpstreamWarmupService) warmOnce(ctx context.Context) {
 		eligible = append(eligible, account)
 	}
 	if len(eligible) == 0 {
-		return
+		return 0
 	}
 	maxAccounts := 0
 	if s.cfg != nil {
@@ -174,26 +191,33 @@ func (s *UpstreamWarmupService) warmOnce(ctx context.Context) {
 	}
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
-	warmed := 0
+	var warmed atomic.Int64
 	for _, account := range eligible {
 		url := upstreamWarmURL(account)
 		if url == "" {
 			continue
 		}
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return int(warmed.Load())
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if s.warmAccount(account, url) {
-				warmed++
+			if s.warmAccount(ctx, account, url) {
+				warmed.Add(1)
 			}
 		}()
 	}
 	wg.Wait()
-	if warmed > 0 {
-		slog.Debug("upstream_warmup.cycle_completed", "warmed", warmed, "eligible", len(eligible))
+	count := int(warmed.Load())
+	if count > 0 {
+		slog.Debug("upstream_warmup.cycle_completed", "warmed", count, "eligible", len(eligible))
 	}
+	return count
 }
 
 // jitterSkip 以约 40% 概率跳过某账号本轮预热，由账号 ID + 当前分钟数决定，
@@ -207,9 +231,12 @@ func (s *UpstreamWarmupService) jitterSkip(accountID int64) bool {
 	return seed%10 < 4
 }
 
-func (s *UpstreamWarmupService) warmAccount(account *Account, url string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (s *UpstreamWarmupService) warmAccount(parent context.Context, account *Account, url string) bool {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
+	if ctx.Err() != nil {
+		return false
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

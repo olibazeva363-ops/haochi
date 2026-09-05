@@ -22,10 +22,9 @@ const (
 // (see responseModelBillingDeclaration).
 //
 // The same observer also records the service tier the upstream reports having
-// used (OpenAI service_tier, Anthropic usage.speed). The billable tier is
-// resolved by resolvedOpenAIUpstreamServiceTierFromObserver (upstream echo
-// first, outbound body tier as fallback); the upstream ResolveBillingServiceTier
-// only-lowers path additionally audits downgrades at usage-record time.
+// used (OpenAI service_tier, Anthropic usage.speed). The observed tier stays
+// separate from the final outbound request tier until usage recording resolves
+// the billable tier for the selected credential protocol.
 type upstreamResponseModelObserver struct {
 	first    string
 	terminal string
@@ -218,29 +217,16 @@ func observedUpstreamResponseServiceTier(c *gin.Context) string {
 	return upstreamResponseModelObserverFromContext(c).ServiceTier()
 }
 
-// resolvedOpenAIUpstreamServiceTierFromObserver 返回计费/用量日志实际使用的
-// service tier：
-//
-//  1. observer 记录到的上游真实回显优先——只有上游实际给了 priority/fast 才按
-//     Fast 计费；上游回显 default/flex/auto 等则如实采用并据此计费；
-//  2. 上游未回显时，回退到「最终出站 body」里的 tier（经过 fast policy
-//     filter/force 之后），保证 policy filter 删掉字段后不再按原请求 Fast 计费。
-//
-// HTTP→WS 等使用局部 observer 的路径必须把该 observer 传进来，不能只读
-// Gin context——局部 observer 不会自动写入 context。
-func resolvedOpenAIUpstreamServiceTierFromObserver(observer *upstreamResponseModelObserver, outboundBodyTier *string) *string {
-	if observer != nil {
-		if tier := strings.TrimSpace(observer.ServiceTier()); tier != "" {
-			return normalizeOpenAIServiceTier(tier)
-		}
-	}
+// resolvedOpenAIUpstreamServiceTierFromObserver preserves the final outbound
+// request tier. The observed response tier remains separate on
+// OpenAIForwardResult.UpstreamResponseServiceTier and is reconciled once, at
+// usage time, where the account protocol is available. In particular, the
+// private ChatGPT Codex backend commonly reports default even for effective
+// Fast turns, while public API response tiers remain authoritative.
+func resolvedOpenAIUpstreamServiceTierFromObserver(_ *upstreamResponseModelObserver, outboundBodyTier *string) *string {
 	return outboundBodyTier
 }
 
-// resolvedOpenAIUpstreamServiceTier 读取 Gin context 上的 observer 后委托
-// resolvedOpenAIUpstreamServiceTierFromObserver。标准 HTTP 转发路径通过
-// beginUpstreamResponseModelObservation 把 observer 挂到 context；局部
-// observer 路径应直接调用 FromObserver。
 func resolvedOpenAIUpstreamServiceTier(c *gin.Context, outboundBodyTier *string) *string {
 	return resolvedOpenAIUpstreamServiceTierFromObserver(upstreamResponseModelObserverFromContext(c), outboundBodyTier)
 }
@@ -249,8 +235,7 @@ func observeOpenAISSEBody(observer *upstreamResponseModelObserver, body string) 
 	if observer == nil || strings.TrimSpace(body) == "" {
 		return
 	}
-	forEachOpenAISSEDataPayload(body, func(payload []byte) {
-		eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	forEachOpenAISSEFrame(body, func(eventType string, payload []byte) {
 		observer.ObserveOpenAI(payload, eventType)
 	})
 }
@@ -292,8 +277,31 @@ func upstreamModelMismatch(sentModel, responseModel string) *bool {
 		return nil
 	}
 	sentModel = strings.TrimSpace(sentModel)
-	mismatch := sentModel == "" || !strings.EqualFold(sentModel, responseModel)
+	mismatch := sentModel == "" || !upstreamModelsMatchForAudit(sentModel, responseModel)
 	return &mismatch
+}
+
+func upstreamModelsMatchForAudit(sentModel, responseModel string) bool {
+	if strings.EqualFold(sentModel, responseModel) {
+		return true
+	}
+
+	// xAI reports the runtime build ID for these supported public aliases.
+	// Canonicalize only for mismatch auditing; keep the raw response model for
+	// observability and for the separate response-model billing safeguards.
+	sentGrokModel := canonicalGrokBuildRuntimeModel(sentModel)
+	return sentGrokModel != "" && sentGrokModel == canonicalGrokBuildRuntimeModel(responseModel)
+}
+
+func canonicalGrokBuildRuntimeModel(model string) string {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "grok-4.5", "grok-4.5-latest", "grok-4.5-build":
+		return "grok-4.5-build"
+	case "grok-4.6", "grok-4.6-latest", "grok-4.6-build":
+		return "grok-4.6-build"
+	default:
+		return ""
+	}
 }
 
 func upstreamSentModel(requestedModel, upstreamModel string) string {

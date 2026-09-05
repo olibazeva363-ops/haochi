@@ -12,17 +12,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// 辅助：把账号标记为"已确认无可用 overage"(有效期未来)。
-func withNoOverage(a *Account) *Account {
+// 保留旧数据库可能存有的 extra 字段，以验证升级后成功响应不会被旧标记误封。
+func withLegacyNoOverageMarker(a *Account) *Account {
 	if a.Extra == nil {
 		a.Extra = map[string]any{}
 	}
-	a.Extra[overageUnavailableExtraKey] = time.Now().Add(2 * time.Hour).Unix()
+	a.Extra["overage_unavailable_until"] = time.Now().Add(2 * time.Hour).Unix()
 	return a
 }
 
-// 已知无 overage + 5h 利用率≥100% 的成功响应 → 主动打账号级限流。
-func TestUpdateSessionWindow_5hExhausted_KnownNoOverage_SetsRateLimit(t *testing.T) {
+// 成功响应优先于旧 overage 标记：采样满额用量，不主动停调。
+func TestUpdateSessionWindow_5hExhausted_LegacyNoOverageMarkerDoesNotLimit(t *testing.T) {
 	resetAt := time.Now().Add(3 * time.Hour).Truncate(time.Second)
 	headers := http.Header{}
 	headers.Set("anthropic-ratelimit-unified-5h-status", "allowed_warning")
@@ -31,12 +31,12 @@ func TestUpdateSessionWindow_5hExhausted_KnownNoOverage_SetsRateLimit(t *testing
 
 	repo := &anthropicWindowLimitRepo{}
 	svc := NewRateLimitService(repo, nil, nil, nil, nil)
-	account := withNoOverage(&Account{ID: 101, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
+	account := withLegacyNoOverageMarker(&Account{ID: 101, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
 
 	svc.UpdateSessionWindow(context.Background(), account, headers)
 
-	require.Equal(t, 1, repo.rateLimitCalls, "已知无 overage 的号 5h 满额应主动限流")
-	require.Equal(t, resetAt.Unix(), repo.lastRateLimitReset.Unix())
+	require.Zero(t, repo.rateLimitCalls)
+	require.Equal(t, 1.0, repo.lastExtraUpdates["session_window_utilization"])
 }
 
 // 5h 利用率≥100% 但未知/有 overage → 不主动限流，留池里用积分续。
@@ -56,8 +56,8 @@ func TestUpdateSessionWindow_5hExhausted_OverageMaybeAvailable_NoRateLimit(t *te
 	require.Zero(t, repo.rateLimitCalls, "overage 未知/可用的号不应被主动踢出，应留池用积分续")
 }
 
-// 已知无 overage + 5h rejected → 主动限流。
-func TestUpdateSessionWindow_5hRejected_KnownNoOverage_SetsRateLimit(t *testing.T) {
+// 基础窗口 rejected 的成功响应仍可由 overage 承载。
+func TestUpdateSessionWindow_5hRejected_LegacyNoOverageMarkerDoesNotLimit(t *testing.T) {
 	resetAt := time.Now().Add(90 * time.Minute).Truncate(time.Second)
 	headers := http.Header{}
 	headers.Set("anthropic-ratelimit-unified-5h-status", "rejected")
@@ -65,15 +65,16 @@ func TestUpdateSessionWindow_5hRejected_KnownNoOverage_SetsRateLimit(t *testing.
 
 	repo := &anthropicWindowLimitRepo{}
 	svc := NewRateLimitService(repo, nil, nil, nil, nil)
-	account := withNoOverage(&Account{ID: 102, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
+	account := withLegacyNoOverageMarker(&Account{ID: 102, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
 
 	svc.UpdateSessionWindow(context.Background(), account, headers)
 
-	require.Equal(t, 1, repo.rateLimitCalls, "已知无 overage 的号 5h rejected 应主动限流")
+	require.Zero(t, repo.rateLimitCalls)
+	require.Equal(t, 1, repo.sessionWindowCalls)
 }
 
-// 已知无 overage + 7d 账号级周窗口耗尽 → 主动限流。
-func TestUpdateSessionWindow_7dExhausted_KnownNoOverage_SetsRateLimit(t *testing.T) {
+// 周窗口耗尽的成功响应采样真实用量，等待实际 429 才执行窗口冷却。
+func TestUpdateSessionWindow_7dExhausted_LegacyNoOverageMarkerDoesNotLimit(t *testing.T) {
 	resetAt := time.Now().Add(48 * time.Hour).Truncate(time.Second)
 	headers := http.Header{}
 	headers.Set("anthropic-ratelimit-unified-5h-status", "allowed")
@@ -82,12 +83,13 @@ func TestUpdateSessionWindow_7dExhausted_KnownNoOverage_SetsRateLimit(t *testing
 
 	repo := &anthropicWindowLimitRepo{}
 	svc := NewRateLimitService(repo, nil, nil, nil, nil)
-	account := withNoOverage(&Account{ID: 103, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
+	account := withLegacyNoOverageMarker(&Account{ID: 103, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
 
 	svc.UpdateSessionWindow(context.Background(), account, headers)
 
-	require.Equal(t, 1, repo.rateLimitCalls, "已知无 overage 的号 7d 耗尽应主动限流")
-	require.Equal(t, resetAt.Unix(), repo.lastRateLimitReset.Unix())
+	require.Zero(t, repo.rateLimitCalls)
+	require.Equal(t, 1.0, repo.lastExtraUpdates["passive_usage_7d_utilization"])
+	require.Equal(t, resetAt.Unix(), repo.lastExtraUpdates["passive_usage_7d_reset"])
 }
 
 // 仅 7d_oi(Fable 包含额度周窗)耗尽 → 不打任何冷却(overage 承载)。
@@ -100,7 +102,7 @@ func TestUpdateSessionWindow_Passive7dOIExhaustedDoesNotCooldown(t *testing.T) {
 
 	repo := &anthropicWindowLimitRepo{}
 	svc := NewRateLimitService(repo, nil, nil, nil, nil)
-	account := withNoOverage(&Account{ID: 106, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
+	account := withLegacyNoOverageMarker(&Account{ID: 106, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
 
 	svc.UpdateSessionWindow(context.Background(), account, headers)
 
@@ -116,7 +118,7 @@ func TestUpdateSessionWindow_HealthyWindowNoRateLimit(t *testing.T) {
 
 	repo := &anthropicWindowLimitRepo{}
 	svc := NewRateLimitService(repo, nil, nil, nil, nil)
-	account := withNoOverage(&Account{ID: 104, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
+	account := withLegacyNoOverageMarker(&Account{ID: 104, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
 
 	svc.UpdateSessionWindow(context.Background(), account, headers)
 
@@ -124,8 +126,8 @@ func TestUpdateSessionWindow_HealthyWindowNoRateLimit(t *testing.T) {
 	require.Zero(t, repo.modelRateLimitCalls)
 }
 
-// 开关关闭时即使已知无 overage 也不主动剔除。
-func TestUpdateSessionWindow_DisabledByEnv(t *testing.T) {
+// 旧环境变量遗留不应改变成功响应的采样与调度语义。
+func TestUpdateSessionWindow_LegacyCooldownEnvDoesNotLimitSuccessfulResponse(t *testing.T) {
 	t.Setenv("SUB2API_PASSIVE_WINDOW_COOLDOWN", "0")
 	resetAt := time.Now().Add(3 * time.Hour).Truncate(time.Second)
 	headers := http.Header{}
@@ -135,7 +137,7 @@ func TestUpdateSessionWindow_DisabledByEnv(t *testing.T) {
 
 	repo := &anthropicWindowLimitRepo{}
 	svc := NewRateLimitService(repo, nil, nil, nil, nil)
-	account := withNoOverage(&Account{ID: 105, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
+	account := withLegacyNoOverageMarker(&Account{ID: 105, Type: AccountTypeOAuth, Platform: PlatformAnthropic})
 
 	svc.UpdateSessionWindow(context.Background(), account, headers)
 

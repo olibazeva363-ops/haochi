@@ -23,7 +23,7 @@ func TestGatewayRecoverClaudeSKImportTokenOn401UpdatesCredentials(t *testing.T) 
 		if got := r.Header.Get("Cookie"); got != "converter-cookie" {
 			t.Fatalf("converter cookie = %q", got)
 		}
-		_, _ = w.Write([]byte(fmt.Sprintf(`{
+		_, _ = fmt.Fprintf(w, `{
 			"email":"claude@example.com",
 			"token_json":{"claudeAiOauth":{
 				"accessToken":"new-access",
@@ -32,7 +32,7 @@ func TestGatewayRecoverClaudeSKImportTokenOn401UpdatesCredentials(t *testing.T) 
 				"scopes":["user:chat"],
 				"subscriptionType":"pro"
 			}}
-		}`, expiresAt)))
+		}`, expiresAt)
 	}))
 	defer server.Close()
 	_ = os.Setenv("SUB2API_CONVERT_URL", server.URL)

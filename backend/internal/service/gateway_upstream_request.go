@@ -102,9 +102,13 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// 同步 billing header cc_version 与实际发送的 User-Agent 版本
-	if fingerprint != nil {
-		body = syncBillingHeaderVersion(body, fingerprint.UserAgent)
+	// Mimicry may override the cached User-Agent later, even without a fingerprint.
+	billingUA := effectiveBillingUserAgent(tokenType, mimicClaudeCode, fingerprint)
+	if frozenProfile != nil {
+		billingUA = frozenProfile.UserAgent
+	}
+	if billingUA != "" {
+		body = syncBillingHeaderVersion(body, billingUA)
 	}
 
 	// === 计算最终 anthropic-beta header（先于 body sanitize 与 CCH 签名）===
@@ -124,7 +128,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		tokenType, mimicClaudeCode, modelID, clientHeaders, body, effectiveDropSet,
 	)
 	if frozenProfile != nil {
-		finalBetaHeader = mergeAnthropicBetaDropping(frozenProfile.BetaSet, "", effectiveDropSet)
+		finalBetaHeader = mergeAnthropicBetaDropping(frozenProfile.BetaSet, finalBetaHeader, effectiveDropSet)
 		finalBetaShouldSet = true
 	}
 

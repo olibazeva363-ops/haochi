@@ -1,11 +1,6 @@
 // Package claude provides constants and helpers for Claude API integration.
 package claude
 
-import (
-	"os"
-	"strings"
-)
-
 // Claude Code 客户端相关常量
 
 // Beta header 常量
@@ -30,6 +25,17 @@ const (
 	BetaRedactThinking     = "redact-thinking-2026-02-12"
 	BetaContextManagement  = "context-management-2025-06-27"
 	BetaExtendedCacheTTL   = "extended-cache-ttl-2025-04-11"
+
+	// server-side refusal fallback beta 字段族（beta Messages API 专有）。
+	// 客户端（Claude Code / SDK / OpenCode 等）会默认透传 body.fallbacks /
+	// body.fallback_credit_token，上游仅在 anthropic-beta 携带对应 token 时接受；
+	// 缺 token 时 Pydantic 拒收："fallbacks: Extra inputs are not permitted"。
+	// 仅用于 sanitize 的条件判断（strip-or-keep），禁止加入
+	// FullClaudeCodeMimicryBetas / DefaultBetaHeader / APIKeyBetaHeader /
+	// Bedrock 白名单：server-side fallback 会换模型、改计费，不能默认打开。
+	BetaServerSideFallback   = "server-side-fallback-2026-07-01"
+	BetaFallbackCredit       = "fallback-credit-2026-07-01"
+	BetaFallbackCreditLegacy = "fallback-credit-2026-06-01"
 )
 
 // DroppedBetas 是转发时需要从 anthropic-beta header 中移除的 beta token 列表。
@@ -68,31 +74,13 @@ const APIKeyHaikuBetaHeader = BetaInterleavedThinking
 // 客户端缺省时统一使用 5m"，这样既不浪费 1h 缓存额度，也保留客户端自定义能力。
 const DefaultCacheControlTTL = "5m"
 
-// CLICurrentVersion 是 sub2api 当前对外伪装的 Claude Code CLI 版本号（三段 semver）。
+// CLICurrentVersion 是内置的 Claude Code CLI 伪装版本号基线（三段 semver）。
 // 用于 billing attribution block 中的 cc_version=X.Y.Z.{fp} 前缀以及 fingerprint 计算。
 // 必须与 DefaultHeaders["User-Agent"] 中的版本号严格一致；不一致会被 Anthropic 判第三方。
 //
-// 版本落后官方过多本身就是异常信号。为避免"跟版本必须重新编译"，两者均可通过
-// 环境变量覆盖（init 时机读取）：
-//
-//	SUB2API_CLAUDE_CLI_VERSION  覆盖 CLI 版本（默认 2.1.220）
-//	SUB2API_CLAUDE_SDK_VERSION  覆盖 SDK 版本（默认 0.94.0）
-const defaultCLICurrentVersion = "2.1.220"
-const defaultSDKPackageVersion = "0.94.0"
-
-var (
-	CLICurrentVersion = defaultCLICurrentVersion
-	SDKPackageVersion = defaultSDKPackageVersion
-)
-
-func init() {
-	if v := strings.TrimSpace(os.Getenv("SUB2API_CLAUDE_CLI_VERSION")); v != "" {
-		CLICurrentVersion = v
-	}
-	if v := strings.TrimSpace(os.Getenv("SUB2API_CLAUDE_SDK_VERSION")); v != "" {
-		SDKPackageVersion = v
-	}
-}
+// ⚠️ 读取实际生效的版本号请用 CLIVersion()，它会叠加 SUB2API_CLAUDE_CLI_VERSION 覆盖。
+// 直接引用本常量只在"表达内置基线"时才正确（例如覆盖值的下限校验）。
+const CLICurrentVersion = "2.1.220"
 
 // FullClaudeCodeMimicryBetas 返回最"像"真实 Claude Code CLI 的完整 beta 列表，
 // 用于 OAuth 账号伪装成 Claude Code 时使用。
@@ -116,14 +104,18 @@ func FullClaudeCodeMimicryBetas() []string {
 }
 
 // DefaultHeaders 是 Claude Code 客户端默认请求头。
-// 在 init 中构建以拾取 SUB2API_CLAUDE_CLI_VERSION / SUB2API_CLAUDE_SDK_VERSION 覆盖。
+// CLI 和 SDK 版本在包初始化时解析，与请求体中的版本保持一致。
 //
 // Keep these in sync with recent Claude CLI traffic to reduce the chance
 // that Claude Code-scoped OAuth credentials are rejected as "non-CLI" usage.
 // 版本参考：对齐 Parrot (src/transform/cc_mimicry.py:49) 的 CLI_USER_AGENT。
 var DefaultHeaders = map[string]string{
-	// User-Agent / X-Stainless-Package-Version 在 init 中填充
+	// Keep these in sync with recent Claude CLI traffic to reduce the chance
+	// that Claude Code-scoped OAuth credentials are rejected as "non-CLI" usage.
+	// 版本参考：对齐 Parrot (src/transform/cc_mimicry.py:49) 的 CLI_USER_AGENT。
+	"User-Agent":                                "claude-cli/" + CLIVersion() + " (external, cli)",
 	"X-Stainless-Lang":                          "js",
+	"X-Stainless-Package-Version":               SDKPackageVersion,
 	"X-Stainless-OS":                            "Linux",
 	"X-Stainless-Arch":                          "arm64",
 	"X-Stainless-Runtime":                       "node",
@@ -132,11 +124,6 @@ var DefaultHeaders = map[string]string{
 	"X-Stainless-Timeout":                       "600",
 	"X-App":                                     "cli",
 	"Anthropic-Dangerous-Direct-Browser-Access": "true",
-}
-
-func init() {
-	DefaultHeaders["User-Agent"] = "claude-cli/" + CLICurrentVersion + " (external, cli)"
-	DefaultHeaders["X-Stainless-Package-Version"] = SDKPackageVersion
 }
 
 // Model 表示一个 Claude 模型
@@ -149,6 +136,12 @@ type Model struct {
 
 // DefaultModels Claude Code 客户端支持的默认模型列表
 var DefaultModels = []Model{
+	{
+		ID:          "claude-fable-5-1",
+		Type:        "model",
+		DisplayName: "Claude Fable 5.1",
+		CreatedAt:   "2026-09-01T00:00:00Z",
+	},
 	{
 		ID:          "claude-fable-5",
 		Type:        "model",
@@ -225,6 +218,13 @@ const DefaultTestModel = "claude-sonnet-4-5-20250929"
 
 // ModelIDOverrides Claude OAuth 请求需要的模型 ID 映射
 var ModelIDOverrides = map[string]string{
+	"claude-opus-4.8":   "claude-opus-4-8",
+	"claude-opus-4.7":   "claude-opus-4-7",
+	"claude-opus-4.6":   "claude-opus-4-6",
+	"claude-sonnet-4.6": "claude-sonnet-4-6",
+	"claude-opus-4.5":   "claude-opus-4-5-20251101",
+	"claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
+	"claude-haiku-4.5":  "claude-haiku-4-5-20251001",
 	"claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
 	"claude-opus-4-5":   "claude-opus-4-5-20251101",
 	"claude-haiku-4-5":  "claude-haiku-4-5-20251001",

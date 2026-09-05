@@ -97,7 +97,6 @@ func (s *SettingService) ClearConvertCookie(ctx context.Context) (ConvertCookieS
 	return s.GetConvertCookieStatus(ctx), nil
 }
 
-
 func applyConvertURLStatus(status *ConvertCookieStatus) {
 	if status == nil {
 		return

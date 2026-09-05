@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -54,7 +56,8 @@ func TestRelayOpenAICodexTurnState_SetsHeaderAndRecordsProvenance(t *testing.T) 
 
 	raw, ok := svc.openaiCodexTurnStateOrigins.Load("7\x00sess-relay")
 	require.True(t, ok)
-	origin := raw.(openAICodexTurnStateOrigin)
+	origin, ok := raw.(openAICodexTurnStateOrigin)
+	require.True(t, ok)
 	require.Equal(t, int64(42), origin.accountID)
 	require.True(t, origin.expiresAt.After(time.Now()))
 }
@@ -90,7 +93,9 @@ func TestStageOpenAICodexTurnState_StagedHeaders(t *testing.T) {
 	svc.noteStagedOpenAICodexTurnStateCommitted(c, &Account{ID: 44}, staged)
 	raw, ok := svc.openaiCodexTurnStateOrigins.Load("9\x00sess-staged")
 	require.True(t, ok)
-	require.Equal(t, int64(44), raw.(openAICodexTurnStateOrigin).accountID)
+	origin, ok := raw.(openAICodexTurnStateOrigin)
+	require.True(t, ok)
+	require.Equal(t, int64(44), origin.accountID)
 
 	// 上游无值 → 清除已暂存的值；nil 集合保持 nil
 	stageOpenAICodexTurnState(&staged, http.Header{})
@@ -123,7 +128,9 @@ func TestStagedTurnState_AbandonedAttemptDoesNotPoisonProvenance(t *testing.T) {
 
 	raw, ok := svc.openaiCodexTurnStateOrigins.Load("11\x00sess-abandoned")
 	require.True(t, ok)
-	require.Equal(t, int64(52), raw.(openAICodexTurnStateOrigin).accountID)
+	origin, ok := raw.(openAICodexTurnStateOrigin)
+	require.True(t, ok)
+	require.Equal(t, int64(52), origin.accountID)
 }
 
 func TestNoteStagedOpenAICodexTurnStateCommitted_NoopWithoutState(t *testing.T) {
@@ -242,6 +249,19 @@ func TestWriteOpenAIPassthroughResponseHeaders_RelaysAndClearsTurnState(t *testi
 	// 上游缺失时清除残留（failover 换号防串扰）
 	writeOpenAIPassthroughResponseHeaders(dst, http.Header{"Content-Type": []string{"application/json"}}, nil)
 	require.Empty(t, dst.Get("X-Codex-Turn-State"))
+}
+
+func TestWriteOpenAIPassthroughResponseHeaders_RelaysReasoningIncluded(t *testing.T) {
+	dst := http.Header{}
+	src := http.Header{}
+	src.Set("X-Reasoning-Included", "1")
+
+	writeOpenAIPassthroughResponseHeaders(
+		dst,
+		src,
+		responseheaders.CompileHeaderFilter(config.ResponseHeaderConfig{}),
+	)
+	require.Equal(t, "1", dst.Get("X-Reasoning-Included"))
 }
 
 func TestEnsureOpenAIRemoteCompactionV2BetaFeature(t *testing.T) {

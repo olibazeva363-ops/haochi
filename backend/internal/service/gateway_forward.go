@@ -139,11 +139,21 @@ func (s *GatewayService) cloneFailoverResponseHeaders(ctx context.Context, resp 
 }
 
 // Forward 转发请求到Claude API
-func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, parsed *ParsedRequest) (*ForwardResult, error) {
+func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, parsed *ParsedRequest) (result *ForwardResult, err error) {
 	startTime := time.Now()
 	if parsed == nil {
 		return nil, fmt.Errorf("parse request: empty request")
 	}
+	// Anthropic Fast is requested with speed=fast rather than OpenAI's
+	// service_tier. Attach it at this shared boundary so passthrough, OAuth and
+	// partial-stream results all use the same billing and usage-log path.
+	defer func() {
+		if result != nil {
+			if tier := anthropicSpeedServiceTier(account, parsed.Speed, anthropicSpeedModel(parsed, result)); tier != nil {
+				result.ServiceTier = tier
+			}
+		}
+	}()
 	beginUpstreamResponseModelObservation(c)
 
 	// Web Search 模拟：纯 web_search 请求时，直接调用搜索 API 构造响应
@@ -434,59 +444,22 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
 			}
-			// Transport attempt left local validation; count Ollama Cloud activity.
-			if !errors.Is(err, context.Canceled) {
-				scheduleOllamaCloudUsageActivity(s.deferredService, account)
-			}
-			clientAbort := isClientAbort(ctx, err)
-			safeErr := sanitizeStreamError(err)
-			if account.IsAnthropicOAuthOrSetupToken() && !clientAbort && attempt < claudeTransportMaxAttempts {
+			if account.IsAnthropicOAuthOrSetupToken() && !isClientAbort(ctx, err) &&
+				!classifyUpstreamTransportError(err).Persistent && attempt < claudeTransportMaxAttempts {
 				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-					Platform:           account.Platform,
-					AccountID:          account.ID,
-					AccountName:        account.Name,
-					UpstreamStatusCode: 0,
-					UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
-					Kind:               "system_error_retry",
-					Message:            safeErr,
+					ProxyID: opsUpstreamProxyID(account), ProxyName: opsUpstreamProxyName(account),
+					Platform: account.Platform, AccountID: account.ID, AccountName: account.Name,
+					UpstreamURL: safeUpstreamURL(upstreamReq.URL.String()),
+					Kind:        "system_error_retry", Message: sanitizeUpstreamErrorMessage(err.Error()),
 				})
-				logger.LegacyPrintf("service.gateway", "Account %d: Claude transport error, retrying once after %v: %s", account.ID, claudeTransportRetryDelay, safeErr)
 				if sleepErr := sleepWithContext(ctx, claudeTransportRetryDelay); sleepErr != nil {
 					return nil, sleepErr
 				}
 				continue
 			}
-
-			kind := "request_error"
-			if clientAbort {
-				kind = "client_abort"
-			}
-			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-				Platform:           account.Platform,
-				AccountID:          account.ID,
-				AccountName:        account.Name,
-				UpstreamStatusCode: 0,
-				UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
-				Kind:               kind,
-				Message:            safeErr,
+			return nil, s.handleUpstreamTransportError(ctx, c, account, err, OpsUpstreamErrorEvent{
+				UpstreamURL: safeUpstreamURL(upstreamReq.URL.String()),
 			})
-			if clientAbort {
-				return nil, err
-			}
-			if s.rateLimitService != nil {
-				s.rateLimitService.HandleAnthropicTransportFailure(ctx, account, safeErr)
-			}
-			setOpsUpstreamError(c, 0, safeErr, "")
-			if c != nil {
-				c.JSON(http.StatusBadGateway, gin.H{
-					"type": "error",
-					"error": gin.H{
-						"type":    "upstream_error",
-						"message": "Upstream request failed",
-					},
-				})
-			}
-			return nil, fmt.Errorf("upstream request failed: %s", safeErr)
 		}
 
 		if resp.StatusCode == http.StatusUnauthorized && !sk401Recovered && IsClaudeSKImportAccount(account) {
@@ -524,6 +497,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 				if s.shouldRectifySignatureError(ctx, account, respBody, reqModel) {
 					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+						ProxyID:            opsUpstreamProxyID(account),
+						ProxyName:          opsUpstreamProxyName(account),
 						Platform:           account.Platform,
 						AccountID:          account.ID,
 						AccountName:        account.Name,
@@ -585,6 +560,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 							_ = retryResp.Body.Close()
 							if retryReadErr == nil && retryResp.StatusCode == 400 && s.isSignatureErrorPattern(ctx, account, retryRespBody) {
 								appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+									ProxyID:            opsUpstreamProxyID(account),
+									ProxyName:          opsUpstreamProxyName(account),
 									Platform:           account.Platform,
 									AccountID:          account.ID,
 									AccountName:        account.Name,
@@ -625,6 +602,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 											_ = retryResp2.Body.Close()
 										}
 										appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+											ProxyID:            opsUpstreamProxyID(account),
+											ProxyName:          opsUpstreamProxyName(account),
 											Platform:           account.Platform,
 											AccountID:          account.ID,
 											AccountName:        account.Name,
@@ -664,6 +643,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				errMsg := extractUpstreamErrorMessage(respBody)
 				if isThinkingBudgetConstraintError(errMsg) && s.settingService.IsBudgetRectifierEnabled(ctx) {
 					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+						ProxyID:            opsUpstreamProxyID(account),
+						ProxyName:          opsUpstreamProxyName(account),
 						Platform:           account.Platform,
 						AccountID:          account.ID,
 						AccountName:        account.Name,
@@ -734,6 +715,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				respBody, _ := s.readUpstreamErrorBody(resp)
 				_ = resp.Body.Close()
 				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+					ProxyID:            opsUpstreamProxyID(account),
+					ProxyName:          opsUpstreamProxyName(account),
 					Platform:           account.Platform,
 					AccountID:          account.ID,
 					AccountName:        account.Name,
@@ -788,6 +771,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 			s.handleRetryExhaustedSideEffects(ctx, resp, account)
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+				ProxyID:            opsUpstreamProxyID(account),
+				ProxyName:          opsUpstreamProxyName(account),
 				Platform:           account.Platform,
 				AccountID:          account.ID,
 				AccountName:        account.Name,
@@ -824,6 +809,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 		s.handleFailoverSideEffects(ctx, resp, account, reqModel)
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+			ProxyID:            opsUpstreamProxyID(account),
+			ProxyName:          opsUpstreamProxyName(account),
 			Platform:           account.Platform,
 			AccountID:          account.ID,
 			UpstreamStatusCode: resp.StatusCode,
@@ -867,6 +854,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 					upstreamDetail = truncateString(string(respBody), maxBytes)
 				}
 				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+					ProxyID:            opsUpstreamProxyID(account),
+					ProxyName:          opsUpstreamProxyName(account),
 					Platform:           account.Platform,
 					AccountID:          account.ID,
 					AccountName:        account.Name,
@@ -947,6 +936,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				}
 
 				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+					ProxyID:            opsUpstreamProxyID(account),
+					ProxyName:          opsUpstreamProxyName(account),
 					Platform:           account.Platform,
 					AccountID:          account.ID,
 					AccountName:        account.Name,
@@ -964,9 +955,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				)
 
 				return nil, &UpstreamFailoverError{
-					StatusCode:      semanticStatus,
-					ResponseBody:    body,
-					ResponseHeaders: resp.Header.Clone(),
+					StatusCode:   semanticStatus,
+					ResponseBody: body,
 				}
 			}
 			// 流中断（缺失 terminal 事件、读错误、数据间隔超时等）时保留已观测到的
@@ -992,6 +982,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	return &ForwardResult{
 		RequestID:                     resp.Header.Get("x-request-id"),
+		UpstreamHeaders:               resp.Header,
 		Usage:                         *usage,
 		Model:                         originalModel, // 使用原始模型用于计费和日志
 		UpstreamModel:                 mappedModel,

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -23,7 +24,10 @@ const (
 	userConvertMaxResponseBytes = 4 << 20
 )
 
-var userConvertHTTPClient = &http.Client{Timeout: userConvertTimeout}
+var userConvertHTTPClient = &http.Client{
+	Timeout:       userConvertTimeout,
+	CheckRedirect: service.CheckClaudeSKConvertRedirect,
+}
 
 type UserConvertRequest struct {
 	SK     string `json:"sk"`
@@ -60,7 +64,7 @@ func (h *UserHandler) ConvertSK(c *gin.Context) {
 		return
 	}
 	parsedURL, err := url.Parse(upstreamURL)
-	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+	if err != nil || parsedURL.Hostname() == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
 		response.InternalError(c, "Invalid conversion upstream URL")
 		return
 	}
@@ -71,6 +75,7 @@ func (h *UserHandler) ConvertSK(c *gin.Context) {
 		return
 	}
 
+	//nolint:gosec // G704: The validated HTTP(S) endpoint comes only from deployment configuration; user input supplies SK data, never the destination.
 	upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, parsedURL.String(), bytes.NewReader(payload))
 	if err != nil {
 		response.InternalError(c, "Failed to build conversion request")
@@ -78,12 +83,13 @@ func (h *UserHandler) ConvertSK(c *gin.Context) {
 	}
 	applyUserConvertHeaders(upstreamReq, parsedURL, c.GetHeader("Accept-Language"), upstreamCookie)
 
+	//nolint:gosec // G704: The deployment-configured converter is trusted, including private services; the shared CheckRedirect policy forbids leaving its origin.
 	upstreamResp, err := userConvertHTTPClient.Do(upstreamReq)
 	if err != nil {
 		response.Error(c, http.StatusBadGateway, "Conversion upstream request failed")
 		return
 	}
-	defer upstreamResp.Body.Close()
+	defer func() { _ = upstreamResp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(upstreamResp.Body, userConvertMaxResponseBytes+1))
 	if err != nil {

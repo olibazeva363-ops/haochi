@@ -233,8 +233,10 @@ type OpenAIUsage struct {
 type OpenAIForwardResult struct {
 	RequestID  string
 	ResponseID string
-	Usage      OpenAIUsage
-	Model      string // 原始模型（用于响应和日志显示）
+	// UpstreamHeaders 是直接上游的响应头，用于按账户配置解析上游请求标识。
+	UpstreamHeaders http.Header
+	Usage           OpenAIUsage
+	Model           string // 原始模型（用于响应和日志显示）
 	// BillingModel is the model used for cost calculation.
 	// When non-empty, CalculateCost uses this instead of Model.
 	// This is set by the Anthropic Messages conversion path where
@@ -253,14 +255,19 @@ type OpenAIForwardResult struct {
 	// UpstreamEndpoint is the actual upstream API path used for this request.
 	// It avoids guessing when one downstream protocol can use multiple upstream endpoints.
 	UpstreamEndpoint string
-	// ServiceTier 优先取上游实际响应回显的 tier；缺失时回退到最终出站 body 的
-	// tier。nil 表示两者都无识别 tier。
+	// ServiceTier is the final tier sent upstream after policy rewriting.
+	// The upstream response declaration remains separate above and is reconciled
+	// at usage-recording time, where the credential protocol is available.
 	ServiceTier *string
-	// ReasoningEffort is extracted from request body (reasoning.effort) or derived from model suffix.
+	// ReasoningEffort is extracted from request body (reasoning.effort) or derived from model suffix
+	// after group policy rewriting and model-family remapping.
 	// Stored for usage records display; nil means not provided / not applicable.
 	ReasoningEffort *string
-	Stream          bool
-	OpenAIWSMode    bool
+	// RequestedReasoningEffort is the client-requested effort before mapping.
+	// Empty/nil means it should fall back to ReasoningEffort at persistence.
+	RequestedReasoningEffort *string
+	Stream                   bool
+	OpenAIWSMode             bool
 	// UpstreamTerminalEvent is the normalized terminal event observed on an
 	// upstream Responses WebSocket turn. Empty preserves legacy/non-WS success.
 	UpstreamTerminalEvent string
@@ -282,6 +289,10 @@ type OpenAIForwardResult struct {
 	// WebSearchCalls 是 Codex alpha/search 网页搜索调用次数（每次成功请求为 1）。
 	// 上游不返回 usage 字段，>0 时走按次计费（分组单价 × 次数 × 倍率）。
 	WebSearchCalls int
+	// SearchCount is Grok-native web_search / tool search call count (per 1k pricing).
+	SearchCount int
+	// AudioUsage carries Voice billing units when present.
+	AudioUsage *AudioUsage
 
 	wsReplayInput                []json.RawMessage
 	wsReplayInputExists          bool
@@ -408,8 +419,8 @@ func (t *accountWriteThrottle) Allow(id int64, now time.Time) bool {
 
 var defaultOpenAICodexSnapshotPersistThrottle = newAccountWriteThrottle(openAICodexSnapshotPersistMinInterval)
 
-// ErrNoAvailableCompactAccounts indicates the request needs /responses/compact
-// support but no compatible account is available.
+// ErrNoAvailableCompactAccounts indicates a legacy /responses/compact request
+// needs compact support but no compatible account is available.
 var ErrNoAvailableCompactAccounts = errors.New("no available accounts support /responses/compact")
 
 // OpenAIGatewayService handles OpenAI API gateway operations
@@ -429,6 +440,7 @@ type OpenAIGatewayService struct {
 	billingCacheService   *BillingCacheService
 	userGroupRateResolver *userGroupRateResolver
 	httpUpstream          HTTPUpstream
+	pluginManager         *PluginManager
 	deferredService       *DeferredService
 	openAITokenProvider   *OpenAITokenProvider
 	grokTokenProvider     *GrokTokenProvider
@@ -453,6 +465,7 @@ type OpenAIGatewayService struct {
 	openaiWSStateStore             OpenAIWSStateStore
 	openaiScheduler                OpenAIAccountScheduler
 	openaiWSPassthroughDialer      openAIWSClientDialer
+	openaiWSSessionPreemptions     openAIWSSessionPreemptRegistry
 	openaiAccountStats             *openAIAccountRuntimeStats
 	openaiModelTransient           *openAIAccountModelTransientState
 	openaiProxyStreamCircuit       *openAIProxyStreamCircuit
@@ -613,6 +626,10 @@ func (s *OpenAIGatewayService) checkChannelPricingRestriction(ctx context.Contex
 func (s *OpenAIGatewayService) isUpstreamModelRestrictedByChannel(ctx context.Context, groupID int64, account *Account, requestedModel string, requireCompact bool) bool {
 	if s.channelService == nil {
 		return false
+	}
+	if compactForwardModel, ok := openAIForwardModelFromContext(ctx); ok {
+		requestedModel = compactForwardModel.model
+		requireCompact = compactForwardModel.useCompactModelMapping
 	}
 	upstreamModel := resolveOpenAIAccountUpstreamModelForRequest(account, requestedModel, requireCompact)
 	if upstreamModel == "" {
@@ -877,7 +894,10 @@ func (s *OpenAIGatewayService) writeOpenAIWSFallbackErrorResponse(c *gin.Context
 
 	setOpsUpstreamError(c, statusCode, upstreamMessage, "")
 	if account != nil {
+		proxyID, proxyName := opsUpstreamWSProxyAttribution(account)
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+			ProxyID:            proxyID,
+			ProxyName:          proxyName,
 			Platform:           account.Platform,
 			AccountID:          account.ID,
 			AccountName:        account.Name,
@@ -1223,7 +1243,7 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 			}
 			return apiKey, "apikey", nil
 		}
-		apiKey := account.GetOpenAIApiKey()
+		apiKey := strings.TrimSpace(account.GetOpenAIProtocolAPIKey())
 		if apiKey == "" {
 			return "", "", errors.New("api_key not found in credentials")
 		}

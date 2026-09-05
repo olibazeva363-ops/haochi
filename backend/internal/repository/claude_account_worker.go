@@ -127,10 +127,10 @@ func parseClaudeAccountWorkerEndpoints(raw string) (map[int64]claudeAccountWorke
 			return nil, fmt.Errorf("invalid Claude worker URL for account %d", accountID)
 		}
 		if endpointURL.User != nil || endpointURL.RawQuery != "" || endpointURL.Fragment != "" {
-			return nil, fmt.Errorf("Claude worker URL for account %d must not contain credentials, query, or fragment", accountID)
+			return nil, fmt.Errorf("claude worker URL for account %d must not contain credentials, query, or fragment", accountID)
 		}
 		if endpointURL.Path != "" && endpointURL.Path != "/" {
-			return nil, fmt.Errorf("Claude worker URL for account %d must not contain a path", accountID)
+			return nil, fmt.Errorf("claude worker URL for account %d must not contain a path", accountID)
 		}
 		endpointURL.Path = claudeWorkerForwardPath
 		result[accountID] = claudeAccountWorkerEndpoint{forwardURL: endpointURL.String()}
@@ -163,7 +163,7 @@ func (s *claudeAccountWorkerRoutingUpstream) do(
 	profile *tlsfingerprint.Profile,
 ) (*http.Response, error) {
 	if s.configErr != nil {
-		return nil, fmt.Errorf("Claude account worker configuration: %w", s.configErr)
+		return nil, fmt.Errorf("claude account worker configuration: %w", s.configErr)
 	}
 	endpoint, routed := s.endpoints[accountID]
 	if !routed || !isClaudeAccountWorkerTarget(req) {
@@ -173,7 +173,7 @@ func (s *claudeAccountWorkerRoutingUpstream) do(
 		return s.base.Do(req, proxyURL, accountID, accountConcurrency)
 	}
 	if req == nil || req.URL == nil {
-		return nil, errors.New("Claude account worker request is empty")
+		return nil, errors.New("claude account worker request is empty")
 	}
 
 	workerReq, err := http.NewRequestWithContext(req.Context(), http.MethodPost, endpoint.forwardURL, req.Body)
@@ -208,21 +208,21 @@ func (s *claudeAccountWorkerRoutingUpstream) do(
 
 	resp, err := s.client.Do(workerReq)
 	if err != nil {
-		return nil, fmt.Errorf("Claude account worker %d unavailable: %w", accountID, err)
+		return nil, fmt.Errorf("claude account worker %d unavailable: %w", accountID, err)
 	}
 	if workerError := strings.TrimSpace(resp.Header.Get(claudeWorkerHeaderError)); workerError != "" {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 		message := strings.TrimSpace(string(body))
 		if message == "" {
 			message = workerError
 		}
-		return nil, fmt.Errorf("Claude account worker %d failed (%s): %s", accountID, workerError, message)
+		return nil, fmt.Errorf("claude account worker %d failed (%s): %s", accountID, workerError, message)
 	}
 	if !strings.EqualFold(strings.TrimSpace(resp.Header.Get(claudeWorkerHeaderResult)), "upstream") {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<10))
-		return nil, fmt.Errorf("Claude account worker %d returned an invalid internal response", accountID)
+		return nil, fmt.Errorf("claude account worker %d returned an invalid internal response", accountID)
 	}
 	resp.Header.Del(claudeWorkerHeaderError)
 	resp.Header.Del(claudeWorkerHeaderResult)
@@ -323,14 +323,13 @@ func handleClaudeAccountWorkerForward(w http.ResponseWriter, r *http.Request, ac
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, claudeWorkerMaxBodyBytes)
-	upstreamCtx := r.Context()
+	// Never let an allowed provider endpoint redirect this authenticated relay
+	// to an unchecked host. Return redirects to the caller for explicit handling.
+	upstreamCtx := service.WithHTTPUpstreamRedirectsDisabled(r.Context())
 	if profile := service.HTTPUpstreamProfile(strings.TrimSpace(r.Header.Get(claudeWorkerHeaderUpstreamProfile))); profile != service.HTTPUpstreamProfileDefault {
 		upstreamCtx = service.WithHTTPUpstreamProfile(upstreamCtx, profile)
 	}
-	if strings.EqualFold(strings.TrimSpace(r.Header.Get(claudeWorkerHeaderDisableRedirects)), "true") {
-		upstreamCtx = service.WithHTTPUpstreamRedirectsDisabled(upstreamCtx)
-	}
-	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, targetMethod, targetURL.String(), r.Body)
+	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, targetMethod, targetURL.String(), r.Body) //nolint:gosec // G704: shared-secret/account authentication and HTTPS provider-host allowlist above; redirects are disabled.
 	if err != nil {
 		writeClaudeWorkerError(w, http.StatusBadRequest, "invalid_request", "invalid upstream request")
 		return
@@ -371,7 +370,7 @@ func handleClaudeAccountWorkerForward(w http.ResponseWriter, r *http.Request, ac
 		writeClaudeWorkerError(w, http.StatusBadGateway, "empty_response", "upstream returned no response")
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	copyClaudeWorkerResponseHeaders(w.Header(), resp.Header)
 	w.Header().Set(claudeWorkerHeaderResult, "upstream")
 	w.WriteHeader(resp.StatusCode)

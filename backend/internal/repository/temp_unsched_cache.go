@@ -13,6 +13,30 @@ import (
 const tempUnschedPrefix = "temp_unsched:account:"
 const anthropicProtectionPrefix = "anthropic_protection:account:"
 
+const openAIAPIKeyHealthFailurePrefix = "openai_apikey_health:"
+
+var openAIAPIKeyHealthFailureScript = redis.NewScript(`
+	local key = KEYS[1]
+	local sequence_key = key .. ':sequence'
+	local now = redis.call('TIME')
+	local now_ms = (tonumber(now[1]) * 1000) + math.floor(tonumber(now[2]) / 1000)
+	local window_ms = tonumber(ARGV[1]) * 60 * 1000
+	local threshold = tonumber(ARGV[2])
+	local sequence = redis.call('INCR', sequence_key)
+
+	redis.call('ZREMRANGEBYSCORE', key, '-inf', now_ms - window_ms)
+	redis.call('ZADD', key, now_ms, tostring(now_ms) .. ':' .. tostring(sequence))
+	local count = redis.call('ZCARD', key)
+	local ttl = math.max(60, (tonumber(ARGV[1]) + 1) * 60)
+	redis.call('EXPIRE', key, ttl)
+	redis.call('EXPIRE', sequence_key, ttl)
+	if count >= threshold then
+		redis.call('DEL', key, sequence_key)
+		return {count, 1}
+	end
+	return {count, 0}
+`)
+
 var tempUnschedSetScript = redis.NewScript(`
 	local key = KEYS[1]
 	local new_until = tonumber(ARGV[1])
@@ -52,6 +76,43 @@ var _ service.AnthropicProtectionCounterCache = (*tempUnschedCache)(nil)
 
 func NewTempUnschedCache(rdb *redis.Client) service.TempUnschedCache {
 	return &tempUnschedCache{rdb: rdb}
+}
+
+func anthropicProtectionKey(accountID int64, failureClass string) (string, error) {
+	switch failureClass {
+	case "access", "provider", "transport":
+		return fmt.Sprintf("%s%d:%s", anthropicProtectionPrefix, accountID, failureClass), nil
+	default:
+		return "", fmt.Errorf("unsupported anthropic protection failure class %q", failureClass)
+	}
+}
+
+func (c *tempUnschedCache) IncrementAnthropicProtectionFailure(ctx context.Context, accountID int64, failureClass string, window time.Duration) (int64, error) {
+	key, err := anthropicProtectionKey(accountID, failureClass)
+	if err != nil {
+		return 0, err
+	}
+	ttlSeconds := int64(window / time.Second)
+	if ttlSeconds < 1 {
+		ttlSeconds = 1
+	}
+	count, err := anthropicProtectionIncrScript.Run(ctx, c.rdb, []string{key}, ttlSeconds).Int64()
+	if err != nil {
+		return 0, fmt.Errorf("increment anthropic protection failure: %w", err)
+	}
+	return count, nil
+}
+
+func (c *tempUnschedCache) ResetAnthropicProtectionFailures(ctx context.Context, accountID int64) error {
+	keys := make([]string, 0, 3)
+	for _, failureClass := range []string{"access", "provider", "transport"} {
+		key, err := anthropicProtectionKey(accountID, failureClass)
+		if err != nil {
+			return err
+		}
+		keys = append(keys, key)
+	}
+	return c.rdb.Del(ctx, keys...).Err()
 }
 
 // SetTempUnsched 设置临时不可调度状态（只延长不缩短）
@@ -103,46 +164,30 @@ func (c *tempUnschedCache) DeleteTempUnsched(ctx context.Context, accountID int6
 	return c.rdb.Del(ctx, key).Err()
 }
 
-func anthropicProtectionKey(accountID int64, failureClass string) (string, error) {
-	switch failureClass {
-	case "access", "provider", "transport":
-		return fmt.Sprintf("%s%d:%s", anthropicProtectionPrefix, accountID, failureClass), nil
-	default:
-		return "", fmt.Errorf("unsupported anthropic protection failure class %q", failureClass)
-	}
+func (c *tempUnschedCache) openAIAPIKeyHealthKey(accountID int64) string {
+	// The hash tag keeps the rolling window and sequence key in one Redis
+	// Cluster slot even though the Lua script derives the latter dynamically.
+	return fmt.Sprintf("%s{%d}:failures", openAIAPIKeyHealthFailurePrefix, accountID)
 }
 
-// IncrementAnthropicProtectionFailure atomically tracks consecutive failures
-// across gateway instances. The first successful request deletes all classes.
-func (c *tempUnschedCache) IncrementAnthropicProtectionFailure(
-	ctx context.Context,
-	accountID int64,
-	failureClass string,
-	window time.Duration,
-) (int64, error) {
-	key, err := anthropicProtectionKey(accountID, failureClass)
+func (c *tempUnschedCache) RecordOpenAIAPIKeyHealthFailure(ctx context.Context, accountID int64, windowMinutes, threshold int) (int64, bool, error) {
+	if windowMinutes < 1 {
+		windowMinutes = 1
+	}
+	if threshold < 1 {
+		threshold = 1
+	}
+	result, err := openAIAPIKeyHealthFailureScript.Run(ctx, c.rdb, []string{c.openAIAPIKeyHealthKey(accountID)}, windowMinutes, threshold).Slice()
 	if err != nil {
-		return 0, err
+		return 0, false, fmt.Errorf("record OpenAI API key health failure: %w", err)
 	}
-	ttlSeconds := int64(window / time.Second)
-	if ttlSeconds < 1 {
-		ttlSeconds = 1
+	if len(result) != 2 {
+		return 0, false, fmt.Errorf("record OpenAI API key health failure: unexpected result length %d", len(result))
 	}
-	count, err := anthropicProtectionIncrScript.Run(ctx, c.rdb, []string{key}, ttlSeconds).Int64()
-	if err != nil {
-		return 0, fmt.Errorf("increment anthropic protection failure: %w", err)
+	count, countOK := result[0].(int64)
+	tripped, trippedOK := result[1].(int64)
+	if !countOK || !trippedOK {
+		return 0, false, fmt.Errorf("record OpenAI API key health failure: unexpected result types %T/%T", result[0], result[1])
 	}
-	return count, nil
-}
-
-func (c *tempUnschedCache) ResetAnthropicProtectionFailures(ctx context.Context, accountID int64) error {
-	keys := make([]string, 0, 3)
-	for _, failureClass := range []string{"access", "provider", "transport"} {
-		key, err := anthropicProtectionKey(accountID, failureClass)
-		if err != nil {
-			return err
-		}
-		keys = append(keys, key)
-	}
-	return c.rdb.Del(ctx, keys...).Err()
+	return count, tripped == 1, nil
 }

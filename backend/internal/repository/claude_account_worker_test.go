@@ -87,6 +87,9 @@ func TestClaudeAccountWorkerTargetAllowlist(t *testing.T) {
 		"http://api.anthropic.com/v1/messages",
 		"https://api.anthropic.com:8443/v1/messages",
 		"https://evil-anthropic.com/v1/messages",
+		"https://api.anthropic.com.attacker.example/v1/messages",
+		"https://attacker@api.anthropic.com/v1/messages",
+		"https://127.0.0.1/v1/messages",
 		"https://example.com/v1/messages",
 	} {
 		req, err := http.NewRequest(http.MethodPost, rawURL, nil)
@@ -123,7 +126,7 @@ func TestClaudeAccountWorkerRoutesFixedAccountAndPreservesUpstreamResponse(t *te
 
 	resp, err := router.DoWithTLS(req, "socks5://proxy.example:1080", 42, 3, &tlsfingerprint.Profile{Name: "claude-node"})
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { require.NoError(t, resp.Body.Close()) }()
 	responseBody, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
@@ -138,9 +141,38 @@ func TestClaudeAccountWorkerRoutesFixedAccountAndPreservesUpstreamResponse(t *te
 	require.Equal(t, "socks5://proxy.example:1080", call.proxyURL)
 	require.Equal(t, "claude-node", call.profile.Name)
 	require.Equal(t, "https://api.anthropic.com/v1/messages?beta=true", call.request.URL.String())
+	require.True(t, service.HTTPUpstreamRedirectsDisabled(call.request.Context()))
 	require.Equal(t, "Bearer TOKEN", call.request.Header.Get("Authorization"))
 	require.Empty(t, call.request.Header.Get(claudeWorkerHeaderSecret))
 	require.Equal(t, body, call.body)
+}
+
+func TestClaudeAccountWorkerAuthenticatesAndValidatesBeforeForwarding(t *testing.T) {
+	for _, tc := range []struct {
+		name, secret, target string
+		wantStatus           int
+	}{
+		{"missing secret", "", "https://api.anthropic.com/v1/messages", http.StatusUnauthorized},
+		{"wrong secret", strings.Repeat("x", len(claudeWorkerTestSecret)), "https://api.anthropic.com/v1/messages", http.StatusUnauthorized},
+		{"private target", claudeWorkerTestSecret, "https://127.0.0.1/admin", http.StatusBadRequest},
+		{"deceptive host", claudeWorkerTestSecret, "https://api.anthropic.com.attacker.example/v1/messages", http.StatusBadRequest},
+		{"target credentials", claudeWorkerTestSecret, "https://attacker@api.anthropic.com/v1/messages", http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &claudeWorkerUpstreamStub{}
+			req := httptest.NewRequest(http.MethodPost, claudeWorkerForwardPath, strings.NewReader(`{}`))
+			req.Header.Set(claudeWorkerHeaderSecret, tc.secret)
+			req.Header.Set(claudeWorkerHeaderAccountID, "42")
+			req.Header.Set(claudeWorkerHeaderTargetURL, tc.target)
+			req.Header.Set(claudeWorkerHeaderTargetMethod, http.MethodPost)
+			response := httptest.NewRecorder()
+
+			newClaudeAccountWorkerHandler(42, claudeWorkerTestSecret, upstream).ServeHTTP(response, req)
+
+			require.Equal(t, tc.wantStatus, response.Code)
+			require.Empty(t, upstream.calls)
+		})
+	}
 }
 
 func TestClaudeAccountWorkerLeavesUnmappedAndNonClaudeRequestsOnBaseUpstream(t *testing.T) {
@@ -158,13 +190,13 @@ func TestClaudeAccountWorkerLeavesUnmappedAndNonClaudeRequestsOnBaseUpstream(t *
 	require.NoError(t, err)
 	resp, err := router.Do(unmapped, "", 43, 1)
 	require.NoError(t, err)
-	resp.Body.Close()
+	require.NoError(t, resp.Body.Close())
 
 	nonClaude, err := http.NewRequest(http.MethodPost, "https://example.com/v1/messages", strings.NewReader(`{}`))
 	require.NoError(t, err)
 	resp, err = router.Do(nonClaude, "", 42, 1)
 	require.NoError(t, err)
-	resp.Body.Close()
+	require.NoError(t, resp.Body.Close())
 	require.Len(t, base.calls, 2)
 }
 
@@ -181,7 +213,7 @@ func TestClaudeAccountWorkerRejectsWrongAccount(t *testing.T) {
 	req.Header.Set(claudeWorkerHeaderTargetMethod, http.MethodPost)
 	resp, err := server.Client().Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { require.NoError(t, resp.Body.Close()) }()
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	require.Equal(t, "account_mismatch", resp.Header.Get(claudeWorkerHeaderError))
 	require.Empty(t, workerUpstream.calls)
@@ -189,16 +221,17 @@ func TestClaudeAccountWorkerRejectsWrongAccount(t *testing.T) {
 
 func TestClaudeAccountWorkerInternalClientDoesNotFollowRedirects(t *testing.T) {
 	targetCalled := false
-	mux := http.NewServeMux()
-	mux.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/target", http.StatusTemporaryRedirect)
-	})
-	mux.HandleFunc("/target", func(w http.ResponseWriter, _ *http.Request) {
+	forwardedSecret := ""
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		targetCalled = true
+		forwardedSecret = r.Header.Get(claudeWorkerHeaderSecret)
 		w.Header().Set(claudeWorkerHeaderResult, "upstream")
 		w.WriteHeader(http.StatusOK)
-	})
-	server := httptest.NewServer(mux)
+	}))
+	t.Cleanup(target.Close)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
 	t.Cleanup(server.Close)
 
 	router := &claudeAccountWorkerRoutingUpstream{
@@ -214,6 +247,28 @@ func TestClaudeAccountWorkerInternalClientDoesNotFollowRedirects(t *testing.T) {
 	_, err = router.Do(req, "", 42, 1)
 	require.ErrorContains(t, err, "invalid internal response")
 	require.False(t, targetCalled)
+	require.Empty(t, forwardedSecret)
+}
+
+func TestClaudeAccountWorkerProviderRedirectsCannotBeEnabledByRequest(t *testing.T) {
+	upstream := &claudeWorkerUpstreamStub{response: &http.Response{
+		StatusCode: http.StatusTemporaryRedirect,
+		Header:     http.Header{"Location": []string{"https://127.0.0.1/private"}},
+		Body:       io.NopCloser(strings.NewReader("")),
+	}}
+	req := httptest.NewRequest(http.MethodPost, claudeWorkerForwardPath, strings.NewReader(`{}`))
+	req.Header.Set(claudeWorkerHeaderSecret, claudeWorkerTestSecret)
+	req.Header.Set(claudeWorkerHeaderAccountID, "42")
+	req.Header.Set(claudeWorkerHeaderTargetURL, "https://api.anthropic.com/v1/messages")
+	req.Header.Set(claudeWorkerHeaderTargetMethod, http.MethodPost)
+	req.Header.Set(claudeWorkerHeaderDisableRedirects, "false")
+	response := httptest.NewRecorder()
+
+	newClaudeAccountWorkerHandler(42, claudeWorkerTestSecret, upstream).ServeHTTP(response, req)
+
+	require.Len(t, upstream.calls, 1)
+	require.True(t, service.HTTPUpstreamRedirectsDisabled(upstream.calls[0].request.Context()))
+	require.Equal(t, http.StatusTemporaryRedirect, response.Code)
 }
 
 var _ service.HTTPUpstream = (*claudeWorkerUpstreamStub)(nil)

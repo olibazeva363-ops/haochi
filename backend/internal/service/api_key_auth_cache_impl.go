@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 20 // v20: group free_openai_fast field
+const apiKeyAuthSnapshotVersion = 23 // v23: group codex_models_manifest_config field
 
 type apiKeyAuthCacheConfig struct {
 	l1Size        int
@@ -360,6 +360,7 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			Email:                      apiKey.User.Email,
 			Username:                   apiKey.User.Username,
 			BalanceNotifyEnabled:       apiKey.User.BalanceNotifyEnabled,
+			RestrictPublicGroups:       apiKey.User.RestrictPublicGroups,
 			BalanceNotifyThresholdType: apiKey.User.BalanceNotifyThresholdType,
 			BalanceNotifyThreshold:     apiKey.User.BalanceNotifyThreshold,
 			BalanceNotifyExtraEmails:   apiKey.User.BalanceNotifyExtraEmails,
@@ -400,7 +401,14 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			VideoPrice480P:                  apiKey.Group.VideoPrice480P,
 			VideoPrice720P:                  apiKey.Group.VideoPrice720P,
 			VideoPrice1080P:                 apiKey.Group.VideoPrice1080P,
+			VideoModelPrices:                NormalizeVideoModelPrices(apiKey.Group.VideoModelPrices),
 			WebSearchPricePerCall:           apiKey.Group.WebSearchPricePerCall,
+			SearchPricePer1k:                apiKey.Group.SearchPricePer1k,
+			AudioRealtimePricePerMin:        apiKey.Group.AudioRealtimePricePerMin,
+			AudioTTSPricePerMillionChars:    apiKey.Group.AudioTTSPricePerMillionChars,
+			AudioSTTPricePerHour:            apiKey.Group.AudioSTTPricePerHour,
+			LongContextPricingEnabled:       apiKey.Group.LongContextPricingEnabled,
+			ModelPricing:                    apiKey.Group.ModelPricing,
 			ClaudeCodeOnly:                  apiKey.Group.ClaudeCodeOnly,
 			FallbackGroupID:                 apiKey.Group.FallbackGroupID,
 			FallbackGroupIDOnInvalidRequest: apiKey.Group.FallbackGroupIDOnInvalidRequest,
@@ -415,6 +423,7 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			DefaultMappedModel:              apiKey.Group.DefaultMappedModel,
 			MessagesDispatchModelConfig:     apiKey.Group.MessagesDispatchModelConfig,
 			ModelsListConfig:                apiKey.Group.ModelsListConfig,
+			CodexModelsManifestConfig:       apiKey.Group.CodexModelsManifestConfig,
 			RPMLimit:                        apiKey.Group.RPMLimit,
 			MaxReasoningEffort:              apiKey.Group.MaxReasoningEffort,
 			MaxReasoningEffortOverLimit:     apiKey.Group.MaxReasoningEffortOverLimit,
@@ -460,6 +469,7 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			Email:                      snapshot.User.Email,
 			Username:                   snapshot.User.Username,
 			BalanceNotifyEnabled:       snapshot.User.BalanceNotifyEnabled,
+			RestrictPublicGroups:       snapshot.User.RestrictPublicGroups,
 			BalanceNotifyThresholdType: snapshot.User.BalanceNotifyThresholdType,
 			BalanceNotifyThreshold:     snapshot.User.BalanceNotifyThreshold,
 			BalanceNotifyExtraEmails:   snapshot.User.BalanceNotifyExtraEmails,
@@ -493,7 +503,14 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			VideoPrice480P:                  snapshot.Group.VideoPrice480P,
 			VideoPrice720P:                  snapshot.Group.VideoPrice720P,
 			VideoPrice1080P:                 snapshot.Group.VideoPrice1080P,
+			VideoModelPrices:                NormalizeVideoModelPrices(snapshot.Group.VideoModelPrices),
 			WebSearchPricePerCall:           snapshot.Group.WebSearchPricePerCall,
+			SearchPricePer1k:                snapshot.Group.SearchPricePer1k,
+			AudioRealtimePricePerMin:        snapshot.Group.AudioRealtimePricePerMin,
+			AudioTTSPricePerMillionChars:    snapshot.Group.AudioTTSPricePerMillionChars,
+			AudioSTTPricePerHour:            snapshot.Group.AudioSTTPricePerHour,
+			LongContextPricingEnabled:       snapshot.Group.LongContextPricingEnabled,
+			ModelPricing:                    snapshot.Group.ModelPricing,
 			ClaudeCodeOnly:                  snapshot.Group.ClaudeCodeOnly,
 			FallbackGroupID:                 snapshot.Group.FallbackGroupID,
 			FallbackGroupIDOnInvalidRequest: snapshot.Group.FallbackGroupIDOnInvalidRequest,
@@ -508,6 +525,7 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			DefaultMappedModel:              snapshot.Group.DefaultMappedModel,
 			MessagesDispatchModelConfig:     snapshot.Group.MessagesDispatchModelConfig,
 			ModelsListConfig:                snapshot.Group.ModelsListConfig,
+			CodexModelsManifestConfig:       snapshot.Group.CodexModelsManifestConfig,
 			RPMLimit:                        snapshot.Group.RPMLimit,
 			MaxReasoningEffort:              snapshot.Group.MaxReasoningEffort,
 			MaxReasoningEffortOverLimit:     snapshot.Group.MaxReasoningEffortOverLimit,

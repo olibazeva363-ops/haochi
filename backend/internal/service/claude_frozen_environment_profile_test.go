@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,12 +14,141 @@ import (
 
 type frozenEnvironmentAccountRepo struct {
 	AccountRepository
-	updates []map[string]any
+	mu          sync.Mutex
+	updates     []map[string]any
+	pauses      []string
+	updateErr   error
+	pauseErr    error
+	updateCalls int
+	pauseCalls  int
 }
 
 func (r *frozenEnvironmentAccountRepo) UpdateExtra(_ context.Context, _ int64, updates map[string]any) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.updateCalls++
+	if r.updateErr != nil {
+		return r.updateErr
+	}
 	r.updates = append(r.updates, updates)
 	return nil
+}
+
+func (r *frozenEnvironmentAccountRepo) SetTempUnschedulable(_ context.Context, _ int64, _ time.Time, reason string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pauseCalls++
+	if r.pauseErr != nil {
+		return r.pauseErr
+	}
+	r.pauses = append(r.pauses, reason)
+	return nil
+}
+
+func TestClaudeFrozenTransportRetriesFailedPersistence(t *testing.T) {
+	for _, failPause := range []bool{true, false} {
+		name := "profile_write_failed"
+		if failPause {
+			name = "pause_write_failed"
+		}
+		t.Run(name, func(t *testing.T) {
+			oldProxy, newProxy := int64(11), int64(22)
+			account := &Account{ID: 43, Platform: PlatformAnthropic, Type: AccountTypeOAuth, ProxyID: &oldProxy}
+			profile := newClaudeFrozenEnvironmentProfile(account, nil)
+			account.ProxyID = &newProxy
+			repo := &frozenEnvironmentAccountRepo{}
+			if failPause {
+				repo.pauseErr = context.DeadlineExceeded
+			} else {
+				repo.updateErr = context.DeadlineExceeded
+			}
+			svc := &GatewayService{accountRepo: repo}
+			svc.claudeFrozenProfiles.Store(account.ID, profile)
+
+			svc.observeClaudeFrozenTransport(context.Background(), account, profile)
+			cached, _ := svc.claudeFrozenProfiles.Load(account.ID)
+			require.Same(t, profile, cached, "failed persistence must not acknowledge the proxy change")
+			if failPause {
+				require.Zero(t, repo.updateCalls, "do not persist a new proxy before saving its pause")
+			}
+			require.Len(t, repo.updates, 0)
+
+			repo.pauseErr, repo.updateErr = nil, nil
+			svc.observeClaudeFrozenTransport(context.Background(), account, profile)
+			cached, _ = svc.claudeFrozenProfiles.Load(account.ID)
+			require.NotSame(t, profile, cached)
+			updated, ok := cached.(*ClaudeFrozenEnvironmentProfile)
+			require.True(t, ok)
+			require.Equal(t, newProxy, updated.ProxyID)
+			require.Equal(t, oldProxy, profile.ProxyID)
+			require.Equal(t, 2, repo.pauseCalls)
+			require.Len(t, repo.updates, 1)
+		})
+	}
+}
+
+func TestClaudeFrozenTransportUpdatesWithoutRepository(t *testing.T) {
+	oldProxy, newProxy := int64(11), int64(22)
+	account := &Account{ID: 44, Platform: PlatformAnthropic, Type: AccountTypeOAuth, ProxyID: &oldProxy}
+	profile := newClaudeFrozenEnvironmentProfile(account, nil)
+	account.ProxyID = &newProxy
+	svc := &GatewayService{}
+	svc.claudeFrozenProfiles.Store(account.ID, profile)
+
+	svc.observeClaudeFrozenTransport(context.Background(), account, profile)
+	cached, _ := svc.claudeFrozenProfiles.Load(account.ID)
+	updated, ok := cached.(*ClaudeFrozenEnvironmentProfile)
+	require.True(t, ok)
+	require.Equal(t, newProxy, updated.ProxyID)
+	require.Equal(t, oldProxy, profile.ProxyID)
+	svc.observeClaudeFrozenTransport(context.Background(), account, updated)
+	cached, _ = svc.claudeFrozenProfiles.Load(account.ID)
+	require.Same(t, updated, cached, "an unchanged proxy keeps the same immutable snapshot")
+}
+
+func TestClaudeFrozenTransportConcurrentObservationsKeepSnapshotsImmutable(t *testing.T) {
+	oldProxy, newProxy := int64(11), int64(22)
+	oldAccount := &Account{ID: 42, Platform: PlatformAnthropic, Type: AccountTypeOAuth, ProxyID: &oldProxy}
+	profile := newClaudeFrozenEnvironmentProfile(oldAccount, nil)
+	account := *oldAccount
+	account.ProxyID = &newProxy
+	repo := &frozenEnvironmentAccountRepo{}
+	svc := &GatewayService{accountRepo: repo}
+	svc.claudeFrozenProfiles.Store(account.ID, profile)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			svc.observeClaudeFrozenTransport(context.Background(), &account, profile)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	require.Equal(t, oldProxy, profile.ProxyID, "in-flight requests keep an immutable old snapshot")
+	cached, ok := svc.claudeFrozenProfiles.Load(account.ID)
+	require.True(t, ok)
+	updated, ok := cached.(*ClaudeFrozenEnvironmentProfile)
+	require.True(t, ok)
+	require.NotSame(t, profile, updated)
+	require.Equal(t, newProxy, updated.ProxyID)
+	require.Equal(t, profile.DeviceID, updated.DeviceID)
+	require.Equal(t, profile.UserAgent, updated.UserAgent)
+	require.Len(t, repo.updates, 1, "one proxy change must be persisted once")
+	require.Len(t, repo.pauses, 1)
+	require.Contains(t, repo.pauses[0], "11 -> 22")
+	require.Same(t, updated, repo.updates[0][claudeFrozenEnvironmentProfileExtraKey])
+
+	// A late request carrying the old account and profile cannot undo the update.
+	svc.observeClaudeFrozenTransport(context.Background(), oldAccount, profile)
+	cached, _ = svc.claudeFrozenProfiles.Load(account.ID)
+	require.Same(t, updated, cached)
+	require.Len(t, repo.updates, 1)
+	require.Len(t, repo.pauses, 1)
 }
 
 func TestClaudeFrozenEnvironmentProfileRoundTrip(t *testing.T) {

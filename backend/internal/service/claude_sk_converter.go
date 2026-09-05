@@ -52,6 +52,25 @@ func ResolveConvertCookie(ctx context.Context) string {
 
 var DefaultClaudeOAuthScopes = []string{"user:chat", "user:inference", "user:profile"}
 
+// CheckClaudeSKConvertRedirect keeps converter requests within the initial
+// deployment-configured origin and retains http.Client's ten-redirect limit.
+// Both SK import/recovery and user conversion must use this CheckRedirect policy.
+func CheckClaudeSKConvertRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return errors.New("converter redirect is missing its original request")
+	}
+	origin := via[0].URL
+	// Include the scheme and port so 307/308 redirects cannot forward SK payloads
+	// or converter cookies to a different service or downgrade HTTPS to HTTP.
+	if req.URL.Scheme != origin.Scheme || !strings.EqualFold(req.URL.Host, origin.Host) {
+		return errors.New("converter redirect to a different origin is not allowed")
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 converter redirects")
+	}
+	return nil
+}
+
 type ConvertedClaudeOAuth struct {
 	AccessToken      string
 	RefreshToken     string
@@ -174,7 +193,7 @@ func ConvertClaudeSK(ctx context.Context, sk, cookie string) (ConvertedClaudeOAu
 		}
 	}
 	parsedConvertURL, err := url.Parse(convertURL)
-	if err != nil || parsedConvertURL.Scheme == "" || parsedConvertURL.Host == "" || (parsedConvertURL.Scheme != "http" && parsedConvertURL.Scheme != "https") {
+	if err != nil || parsedConvertURL.Hostname() == "" || (parsedConvertURL.Scheme != "http" && parsedConvertURL.Scheme != "https") {
 		return ConvertedClaudeOAuth{}, &ClaudeSKConvertError{
 			Kind:      ClaudeSKConvertKindConfiguration,
 			Message:   "converter URL is invalid; set SUB2API_CONVERT_URL to http(s)://HOST/PATH",
@@ -189,6 +208,7 @@ func ConvertClaudeSK(ctx context.Context, sk, cookie string) (ConvertedClaudeOAu
 	}
 
 	body, _ := json.Marshal(map[string]string{"cookie": sk})
+	//nolint:gosec // G704: The HTTP(S) endpoint is set only by the deployment environment, never request data; operators may intentionally use a private converter.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parsedConvertURL.String(), bytes.NewReader(body))
 	if err != nil {
 		return ConvertedClaudeOAuth{}, err
@@ -202,7 +222,11 @@ func ConvertClaudeSK(ctx context.Context, sk, cookie string) (ConvertedClaudeOAu
 	req.Header.Set("Referer", converterOrigin+"/dashboard/convert")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36")
 
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{
+		Timeout:       timeout,
+		CheckRedirect: CheckClaudeSKConvertRedirect,
+	}
+	//nolint:gosec // G704: The validated deployment-configured endpoint is trusted; CheckRedirect prevents leaving its origin and user input only supplies credentials.
 	resp, err := client.Do(req)
 	if err != nil {
 		return ConvertedClaudeOAuth{}, &ClaudeSKConvertError{
@@ -211,7 +235,7 @@ func ConvertClaudeSK(ctx context.Context, sk, cookie string) (ConvertedClaudeOAu
 			Retryable: true,
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

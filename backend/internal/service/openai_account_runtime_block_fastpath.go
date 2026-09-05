@@ -18,7 +18,6 @@ const (
 	openAIOAuth429MaxAccountAttempts      = 3
 	openAIStopSchedulingBridgeCooldown    = 2 * time.Minute
 	openAIOAuth429StormWindow             = 10 * time.Second
-	openAIOAuth429StormThreshold          = 20
 	openAIOAuth429StormMaxAccountSwitches = 1
 )
 
@@ -109,6 +108,19 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	}
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
+	if account != nil && account.Platform == PlatformOpenAI && isOpenAIHTTPUpstreamAccessStateError(statusCode, "", responseBody) {
+		message := "OpenAI upstream account or workspace is unavailable"
+		if upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(responseBody)); upstreamMsg != "" {
+			message = upstreamMsg
+		}
+		if s != nil && s.rateLimitService != nil {
+			s.rateLimitService.handleAuthError(stateCtx, account, message)
+		}
+		if s != nil {
+			s.BlockAccountScheduling(account, time.Time{}, "openai_access_state")
+		}
+		return true
+	}
 
 	if account != nil && account.Platform == PlatformOpenAI && isOpenAIContextWindowError("", responseBody) {
 		return false
@@ -121,8 +133,23 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 		return false
 	}
 
+	// Self-built images requests always carry a matching image_generation tool, so a
+	// "tool choice not found in 'tools'" 400 means upstream revoked this account's
+	// image capability. Gated on the self-built marker: passthrough clients control
+	// their own tools/tool_choice and could otherwise poison a healthy account.
+	if isOpenAIImagesSelfBuiltRequest(ctx) && isOpenAIImageCapabilityLossError(statusCode, responseBody) {
+		if s != nil && s.rateLimitService != nil {
+			_ = s.rateLimitService.HandleOpenAIImageCapabilityLoss(stateCtx, account, statusCode, responseBody)
+		}
+		return false
+	}
+
 	if s == nil || account == nil {
 		return false
+	}
+	// Team 联动熔断必须先于 model-not-found 与账户级临时不可调度规则的早退。
+	if s.rateLimitService != nil {
+		s.rateLimitService.maybeHandleOpenAITeamLinkedError(stateCtx, account, statusCode, responseBody)
 	}
 	stateCtx = withTempUnschedulableModel(stateCtx, canonicalModel)
 	if s.rateLimitService != nil && len(canonicalModel) > 0 && s.rateLimitService.HandleUpstreamModelNotFound(stateCtx, account, canonicalModel[0], statusCode, responseBody) {
@@ -134,6 +161,10 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	if s.rateLimitService != nil && statusCode != http.StatusUnauthorized && len(canonicalModel) > 0 && strings.TrimSpace(canonicalModel[0]) != "" &&
 		s.rateLimitService.HandleTempUnschedulable(stateCtx, account, statusCode, responseBody, canonicalModel[0]) {
 		return true
+	}
+	if statusCode == http.StatusTooManyRequests && s.rateLimitService != nil && len(canonicalModel) > 0 &&
+		s.rateLimitService.HandleOpenAICodexSparkRateLimit(stateCtx, account, canonicalModel[0], statusCode, headers, responseBody) {
+		return false
 	}
 	if statusCode == http.StatusTooManyRequests {
 		s.markOpenAIOAuth429RateLimited(stateCtx, account, headers, responseBody)
@@ -352,6 +383,7 @@ func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
 	mu.Lock()
 	defer mu.Unlock()
 	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+	s.openaiOAuth429RetryStartedAt.Delete(accountID)
 	s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
 }
 
@@ -396,6 +428,9 @@ func canonicalOpenAIAccountSchedulingModel(account *Account, requestedModel stri
 	model := strings.TrimSpace(requestedModel)
 	if account == nil || model == "" {
 		return model
+	}
+	if account.IsOpenAI() {
+		return resolveOpenAIAccountUpstreamModelForRequest(account, model, false)
 	}
 	if mapped := strings.TrimSpace(account.GetMappedModel(model)); mapped != "" {
 		return mapped
@@ -457,17 +492,6 @@ func (s *OpenAIGatewayService) recordOpenAIOAuth429() {
 	s.openaiOAuth429WindowCount.Add(1)
 }
 
-func (s *OpenAIGatewayService) isOpenAIOAuth429Storm() bool {
-	if s == nil {
-		return false
-	}
-	windowStart := s.openaiOAuth429WindowStartUnixNano.Load()
-	if windowStart == 0 || time.Since(time.Unix(0, windowStart)) >= openAIOAuth429StormWindow {
-		return false
-	}
-	return s.openaiOAuth429WindowCount.Load() >= openAIOAuth429StormThreshold
-}
-
 func (s *OpenAIGatewayService) ShouldStopOpenAIOAuth429Failover(account *Account, statusCode int, failedSwitches int, state *OpenAIOAuth429FailoverState) bool {
 	if failedSwitches < openAIOAuth429StormMaxAccountSwitches {
 		return false
@@ -492,5 +516,8 @@ func (s *OpenAIGatewayService) ShouldStopOpenAIOAuth429Failover(account *Account
 	if statusCode != http.StatusTooManyRequests || !isOpenAIOAuthAccount(account) {
 		return false
 	}
-	return s.isOpenAIOAuth429Storm()
+	// Each OpenAI OAuth candidate has already consumed its full same-account
+	// retry window before reaching this switch point. A global storm is useful
+	// telemetry, but must not prevent trying the bounded next-account budget.
+	return failedSwitches >= openAIOAuth429MaxAccountAttempts
 }

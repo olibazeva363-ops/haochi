@@ -64,15 +64,20 @@ type UpdateAPIKeyRequest struct {
 	ResetRateLimitUsage *bool    `json:"reset_rate_limit_usage"` // 重置限速用量
 }
 
-func validAPIKeyLimit(v float64) bool {
-	return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0
-}
+func validAPIKeyLimit(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 }
 
 func validateAPIKeyCreateRequest(req CreateAPIKeyRequest) error {
-	for _, limit := range []*float64{req.Quota, req.RateLimit5h, req.RateLimit1d, req.RateLimit7d} {
-		if limit != nil && !validAPIKeyLimit(*limit) {
-			return errors.New("invalid numeric limit")
-		}
+	if req.Quota != nil && !validAPIKeyLimit(*req.Quota) {
+		return errors.New("invalid quota")
+	}
+	if req.RateLimit5h != nil && !validAPIKeyLimit(*req.RateLimit5h) {
+		return errors.New("invalid rate_limit_5h")
+	}
+	if req.RateLimit1d != nil && !validAPIKeyLimit(*req.RateLimit1d) {
+		return errors.New("invalid rate_limit_1d")
+	}
+	if req.RateLimit7d != nil && !validAPIKeyLimit(*req.RateLimit7d) {
+		return errors.New("invalid rate_limit_7d")
 	}
 	if req.ExpiresInDays != nil && *req.ExpiresInDays <= 0 {
 		return errors.New("invalid expires_in_days")
@@ -81,10 +86,17 @@ func validateAPIKeyCreateRequest(req CreateAPIKeyRequest) error {
 }
 
 func validateAPIKeyUpdateRequest(req UpdateAPIKeyRequest) error {
-	for _, limit := range []*float64{req.Quota, req.RateLimit5h, req.RateLimit1d, req.RateLimit7d} {
-		if limit != nil && !validAPIKeyLimit(*limit) {
-			return errors.New("invalid numeric limit")
-		}
+	if req.Quota != nil && !validAPIKeyLimit(*req.Quota) {
+		return errors.New("invalid quota")
+	}
+	if req.RateLimit5h != nil && !validAPIKeyLimit(*req.RateLimit5h) {
+		return errors.New("invalid rate_limit_5h")
+	}
+	if req.RateLimit1d != nil && !validAPIKeyLimit(*req.RateLimit1d) {
+		return errors.New("invalid rate_limit_1d")
+	}
+	if req.RateLimit7d != nil && !validAPIKeyLimit(*req.RateLimit7d) {
+		return errors.New("invalid rate_limit_7d")
 	}
 	return nil
 }

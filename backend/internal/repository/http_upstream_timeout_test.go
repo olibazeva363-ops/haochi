@@ -10,5 +10,5 @@ func TestBuildUpstreamTransportHasBoundedConnectTimeouts(t *testing.T) {
 	transport, err := buildUpstreamTransport(defaultPoolSettings(nil), nil, upstreamProtocolModeDefault)
 	require.NoError(t, err)
 	require.NotNil(t, transport.DialContext)
-	require.Equal(t, defaultTLSHandshakeTimeout, transport.TLSHandshakeTimeout)
+	require.Equal(t, defaultUpstreamTLSHandshakeTimeout, transport.TLSHandshakeTimeout)
 }

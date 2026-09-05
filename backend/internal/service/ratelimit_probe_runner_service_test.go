@@ -210,7 +210,7 @@ func TestRateLimitProbe_pruneLastProbe(t *testing.T) {
 	cur := base
 	runner.nowFn = func() time.Time { return cur }
 
-	runner.lastProbe[1] = base                       // 新
+	runner.lastProbe[1] = base                        // 新
 	runner.lastProbe[2] = base.Add(-90 * time.Minute) // 老（> 2*reprobe=60m）
 
 	cur = base

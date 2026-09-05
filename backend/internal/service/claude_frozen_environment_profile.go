@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
@@ -22,6 +23,10 @@ const (
 	claudeFrozenEnvironmentProfileExtraKey = "claude_frozen_environment_profile"
 	claudeFrozenEnvironmentProfileSchema   = 1
 )
+
+// Transport changes are rare. A bounded set of locks serializes persistence
+// without retaining one lock for every account ever observed.
+var claudeFrozenTransportLocks [64]sync.Mutex
 
 // ClaudeFrozenEnvironmentProfile is the account-bound identity used only for
 // gateway-generated Claude OAuth traffic. It is persisted in accounts.extra so
@@ -213,17 +218,28 @@ func (p *ClaudeFrozenEnvironmentProfile) fingerprint() *Fingerprint {
 	}
 }
 
+func checkedClaudeFrozenEnvironmentProfile(value any) (*ClaudeFrozenEnvironmentProfile, error) {
+	profile, ok := value.(*ClaudeFrozenEnvironmentProfile)
+	if !ok {
+		return nil, fmt.Errorf("invalid frozen Claude environment profile value type %T", value)
+	}
+	if profile == nil {
+		return nil, fmt.Errorf("frozen Claude environment profile is nil")
+	}
+	return profile, nil
+}
+
 func (s *GatewayService) getOrCreateClaudeFrozenEnvironmentProfile(ctx context.Context, account *Account) (*ClaudeFrozenEnvironmentProfile, error) {
 	if account == nil || !account.IsOAuth() {
 		return nil, nil
 	}
 	if cached, ok := s.claudeFrozenProfiles.Load(account.ID); ok {
-		return cached.(*ClaudeFrozenEnvironmentProfile), nil
+		return checkedClaudeFrozenEnvironmentProfile(cached)
 	}
 	key := strconv.FormatInt(account.ID, 10)
 	value, err, _ := s.claudeFrozenProfileSF.Do(key, func() (any, error) {
 		if cached, ok := s.claudeFrozenProfiles.Load(account.ID); ok {
-			return cached.(*ClaudeFrozenEnvironmentProfile), nil
+			return checkedClaudeFrozenEnvironmentProfile(cached)
 		}
 		if account.Extra != nil {
 			if raw, exists := account.Extra[claudeFrozenEnvironmentProfileExtraKey]; exists {
@@ -262,7 +278,7 @@ func (s *GatewayService) getOrCreateClaudeFrozenEnvironmentProfile(ctx context.C
 	if err != nil {
 		return nil, err
 	}
-	return value.(*ClaudeFrozenEnvironmentProfile), nil
+	return checkedClaudeFrozenEnvironmentProfile(value)
 }
 
 func (s *GatewayService) resolveTLSProfileForFrozenClaudeAccount(account *Account, profile *ClaudeFrozenEnvironmentProfile) *tlsfingerprint.Profile {
@@ -345,7 +361,15 @@ func tlsProfileForRequest(req *http.Request, fallback *tlsfingerprint.Profile) *
 // 典型风控特征。身份由 stableClaudeFrozenIdentity 确定性派生，档案
 // 更新不会改变 device_id/client_id。
 func (s *GatewayService) observeClaudeFrozenTransport(ctx context.Context, account *Account, profile *ClaudeFrozenEnvironmentProfile) {
-	if account == nil || profile == nil {
+	if s == nil || account == nil || profile == nil {
+		return
+	}
+	lock := &claudeFrozenTransportLocks[uint64(account.ID)%uint64(len(claudeFrozenTransportLocks))]
+	lock.Lock()
+	defer lock.Unlock()
+	if cached, ok := s.claudeFrozenProfiles.Load(account.ID); ok && cached != profile {
+		// A concurrent request already replaced this snapshot. Do not let an
+		// older in-flight account snapshot restore the previous proxy binding.
 		return
 	}
 	var currentProxyID int64
@@ -367,32 +391,39 @@ func (s *GatewayService) observeClaudeFrozenTransport(ctx context.Context, accou
 		"current_proxy_id", currentProxyID,
 	)
 
-	profile.ProxyID = currentProxyID
-	profile.ProxyFingerprint = currentProxyFingerprint
-	s.claudeFrozenProfiles.Store(account.ID, profile)
+	// Published profiles remain immutable for request builders and JSON readers.
+	updated := *profile
+	updated.ProxyID = currentProxyID
+	updated.ProxyFingerprint = currentProxyFingerprint
 	if s.accountRepo != nil {
-		if err := s.accountRepo.UpdateExtra(context.WithoutCancel(ctx), account.ID, map[string]any{
-			claudeFrozenEnvironmentProfileExtraKey: profile,
+		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		// Save the pause before acknowledging the new proxy. If either write
+		// fails, retain the old snapshot so a later observation retries it.
+		until := time.Now().Add(10 * time.Minute)
+		reason := fmt.Sprintf("proxy changed (frozen proxy_id %d -> %d); account paused 10m to avoid IP oscillation", profile.ProxyID, currentProxyID)
+		if err := s.accountRepo.SetTempUnschedulable(persistCtx, account.ID, until, reason); err != nil {
+			slog.Warn("claude_frozen_environment_proxy_pause_failed",
+				"account_id", account.ID,
+				"error", err,
+			)
+			return
+		}
+		if err := s.accountRepo.UpdateExtra(persistCtx, account.ID, map[string]any{
+			claudeFrozenEnvironmentProfileExtraKey: &updated,
 		}); err != nil {
 			slog.Warn("claude_frozen_environment_proxy_update_failed",
 				"account_id", account.ID,
 				"error", err,
 			)
+			return
 		}
-		until := time.Now().Add(10 * time.Minute)
-		reason := fmt.Sprintf("proxy changed (frozen proxy_id %d -> %d); account paused 10m to avoid IP oscillation", profile.ProxyID, currentProxyID)
-		if err := s.accountRepo.SetTempUnschedulable(context.WithoutCancel(ctx), account.ID, until, reason); err != nil {
-			slog.Warn("claude_frozen_environment_proxy_pause_failed",
-				"account_id", account.ID,
-				"error", err,
-			)
-		} else {
-			slog.Info("claude_frozen_environment_proxy_paused",
-				"account_id", account.ID,
-				"until", until.Format(time.RFC3339),
-			)
-		}
+		slog.Info("claude_frozen_environment_proxy_paused",
+			"account_id", account.ID,
+			"until", until.Format(time.RFC3339),
+		)
 	}
+	s.claudeFrozenProfiles.Store(account.ID, &updated)
 }
 
 func (s *GatewayService) finalizeClaudeFrozenMimicRequest(req *http.Request, profile *ClaudeFrozenEnvironmentProfile, isStream bool, betaHeader string, betaShouldSet bool) error {

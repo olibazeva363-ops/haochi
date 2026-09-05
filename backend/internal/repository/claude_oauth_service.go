@@ -366,4 +366,3 @@ func (s *claudeOAuthService) RefreshToken(ctx context.Context, refreshToken, pro
 
 	return &tokenResp, nil
 }
-

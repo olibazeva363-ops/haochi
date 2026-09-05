@@ -38,7 +38,8 @@ func TestAnthropicProtectionCounterRejectsUnknownClass(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	cache := NewTempUnschedCache(rdb).(service.AnthropicProtectionCounterCache)
+	cache, ok := NewTempUnschedCache(rdb).(service.AnthropicProtectionCounterCache)
+	require.True(t, ok)
 
 	_, err := cache.IncrementAnthropicProtectionFailure(context.Background(), 99, "unknown", time.Minute)
 	require.ErrorContains(t, err, "unsupported anthropic protection failure class")

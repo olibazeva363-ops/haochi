@@ -278,6 +278,7 @@ func applyToolsLastCacheBreakpoint(body []byte) []byte {
 	if lastIdx == -1 {
 		return body
 	}
+
 	existingCC := arr[lastIdx].Get("cache_control")
 
 	if existingCC.Exists() && existingCC.Get("ttl").String() != "" {
