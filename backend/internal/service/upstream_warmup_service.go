@@ -36,6 +36,10 @@ func upstreamWarmURL(account *Account) string {
 // 不产生任何上游接触（新导入的号零流量时不应被网关反复触碰）。
 const warmupRecentUseWindow = 2 * time.Hour
 
+// Bound unauthenticated error/challenge responses while allowing common HTML
+// bodies to reach EOF, which is required for HTTP/1.1 connection reuse.
+const warmupMaxResponseBytes = 64 << 10
+
 // warmupUserAgent 返回与账号流量画像一致的 UA。
 // TLS 指纹路径伪装 claude-cli，UA 必须同源；否则「Node TLS + Go-http-client UA」
 // 的组合本身就是矛盾的机器人指纹。
@@ -160,8 +164,8 @@ func (s *UpstreamWarmupService) warmOnce(ctx context.Context) int {
 		return 0
 	}
 
-	// 只预热最近使用过的账号；按账号加 ±40% 抖动决定本轮是否跳过，
-	// 打散固定节拍（固定 45s 整点脉冲是明显的机器节奏）。
+	// 只预热最近使用过的账号。OpenAI 每个配置周期都执行，避免连续跳过
+	// 多轮后连接已被回收；Anthropic 保留原有的随机跳过策略。
 	now := time.Now()
 	eligible := make([]*Account, 0, len(accounts))
 	for i := range accounts {
@@ -169,7 +173,7 @@ func (s *UpstreamWarmupService) warmOnce(ctx context.Context) int {
 		if account.LastUsedAt == nil || now.Sub(*account.LastUsedAt) > warmupRecentUseWindow {
 			continue
 		}
-		if account.ID > 0 && s.jitterSkip(account.ID) {
+		if account.Platform != PlatformOpenAI && account.ID > 0 && s.jitterSkip(account.ID) {
 			continue
 		}
 		eligible = append(eligible, account)
@@ -220,8 +224,8 @@ func (s *UpstreamWarmupService) warmOnce(ctx context.Context) int {
 	return count
 }
 
-// jitterSkip 以约 40% 概率跳过某账号本轮预热，由账号 ID + 当前分钟数决定，
-// 使每个账号的实际预热周期在 interval 的 0.6x-1.7x 之间随机浮动。
+// jitterSkip 为 Anthropic 保留约 40% 的逐轮跳过策略，由账号 ID + 当前分钟数决定。
+// 该策略可能连续跳过多轮，不能保证最大间隔，因此不用于 OpenAI 连接保温。
 func (s *UpstreamWarmupService) jitterSkip(accountID int64) bool {
 	seed := uint64(accountID)*2654435761 + uint64(time.Now().Unix()/60)
 	// xorshift64
@@ -237,10 +241,18 @@ func (s *UpstreamWarmupService) warmAccount(parent context.Context, account *Acc
 	if ctx.Err() != nil {
 		return false
 	}
+	// Warm only the configured origin; following a login/challenge redirect can
+	// otherwise warm a different host while leaving the actual upstream cold.
+	ctx = WithHTTPUpstreamRedirectsDisabled(ctx)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return false
+	}
+	if account.Platform == PlatformOpenAI {
+		// OpenAI business requests use a profile-specific H1/H2 pool. Without
+		// this marker, warmup only populates the unrelated default-profile pool.
+		req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", warmupUserAgent(account))
@@ -263,6 +275,9 @@ func (s *UpstreamWarmupService) warmAccount(parent context.Context, account *Acc
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-	return true
+	if resp.Close {
+		return false
+	}
+	read, err := io.Copy(io.Discard, io.LimitReader(resp.Body, warmupMaxResponseBytes+1))
+	return err == nil && read <= warmupMaxResponseBytes
 }

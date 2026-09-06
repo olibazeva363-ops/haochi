@@ -459,6 +459,15 @@ gateway:
   # Idle connection timeout (seconds)
   # 空闲连接超时时间（秒）
   idle_conn_timeout_seconds: 90
+  # 预热最近 2 小时使用过的可调度账号，减少空闲后首条请求的连接握手等待。
+  # OpenAI 使用真实请求的 HTTP/2 / HTTP/1.1 连接池，每个配置周期执行；
+  # Anthropic 保留逐轮随机跳过。预热不发送推理请求，也不携带账号鉴权。
+  upstream_warmup:
+    enabled: true
+    interval_seconds: 45
+    concurrency: 4
+    max_accounts: 200
+    platforms: [anthropic, openai]
   # Upstream client cache settings
   # 上游连接池客户端缓存配置
   # max_upstream_clients: Max cached clients, evicts least recently used when exceeded
