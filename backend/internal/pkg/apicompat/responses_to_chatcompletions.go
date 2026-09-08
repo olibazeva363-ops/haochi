@@ -614,16 +614,20 @@ func (a *BufferedResponseAccumulator) SupplementResponseOutput(resp *ResponsesRe
 		if item.Type != "function_call" || item.Arguments != "" {
 			continue
 		}
+		// Final output can be compressed or reordered; call IDs take priority.
+		var matchedCall *bufferedFuncCall
 		for funcIndex := range a.funcCalls {
 			call := &a.funcCalls[funcIndex]
-			matchesCallID := item.CallID != "" && item.CallID == call.CallID
-			if !matchesCallID && call.OutputIndex != outputIndex {
-				continue
+			if item.CallID != "" && item.CallID == call.CallID {
+				matchedCall = call
+				break
 			}
-			if call.Args.Len() > 0 {
-				item.Arguments = call.Args.String()
+			if call.OutputIndex == outputIndex && (item.CallID == "" || call.CallID == "") {
+				matchedCall = call
 			}
-			break
+		}
+		if matchedCall != nil && matchedCall.Args.Len() > 0 {
+			item.Arguments = matchedCall.Args.String()
 		}
 	}
 }

@@ -24,13 +24,14 @@ const (
 	claudeFrozenEnvironmentProfileSchema   = 1
 )
 
-// Transport changes are rare. A bounded set of locks serializes persistence
+// Profile changes are rare. A bounded set of locks serializes persistence
 // without retaining one lock for every account ever observed.
 var claudeFrozenTransportLocks [64]sync.Mutex
 
 // ClaudeFrozenEnvironmentProfile is the account-bound identity used only for
 // gateway-generated Claude OAuth traffic. It is persisted in accounts.extra so
 // cache expiry, restarts, and downstream client upgrades cannot silently alter it.
+// The built-in CLI version floor may advance without changing its other fields.
 type ClaudeFrozenEnvironmentProfile struct {
 	Schema                  int                     `json:"schema"`
 	Source                  string                  `json:"source"`
@@ -234,28 +235,52 @@ func (s *GatewayService) getOrCreateClaudeFrozenEnvironmentProfile(ctx context.C
 		return nil, nil
 	}
 	if cached, ok := s.claudeFrozenProfiles.Load(account.ID); ok {
-		return checkedClaudeFrozenEnvironmentProfile(cached)
+		profile, err := checkedClaudeFrozenEnvironmentProfile(cached)
+		if err != nil {
+			return nil, err
+		}
+		if _, changed := floorClaudeCLIUserAgentVersion(profile.UserAgent); !changed {
+			return profile, nil
+		}
 	}
 	key := strconv.FormatInt(account.ID, 10)
 	value, err, _ := s.claudeFrozenProfileSF.Do(key, func() (any, error) {
+		// Share the transport lock so a version upgrade cannot overwrite a
+		// concurrent proxy update with an older immutable profile snapshot.
+		lock := &claudeFrozenTransportLocks[uint64(account.ID)%uint64(len(claudeFrozenTransportLocks))]
+		lock.Lock()
+		defer lock.Unlock()
+		var profile *ClaudeFrozenEnvironmentProfile
 		if cached, ok := s.claudeFrozenProfiles.Load(account.ID); ok {
-			return checkedClaudeFrozenEnvironmentProfile(cached)
-		}
-		if account.Extra != nil {
+			var err error
+			profile, err = checkedClaudeFrozenEnvironmentProfile(cached)
+			if err != nil {
+				return nil, err
+			}
+		} else if account.Extra != nil {
 			if raw, exists := account.Extra[claudeFrozenEnvironmentProfileExtraKey]; exists {
-				profile, decodeErr := decodeClaudeFrozenEnvironmentProfile(raw)
+				var decodeErr error
+				profile, decodeErr = decodeClaudeFrozenEnvironmentProfile(raw)
 				if decodeErr != nil {
 					return nil, fmt.Errorf("decode frozen Claude environment profile: %w", decodeErr)
-				}
-				if profile != nil {
-					s.claudeFrozenProfiles.Store(account.ID, profile)
-					return profile, nil
 				}
 			}
 		}
 
-		tlsProfile := s.resolveTLSProfileForFrozenClaudeAccount(account, nil)
-		profile := newClaudeFrozenEnvironmentProfile(account, tlsProfile)
+		created := profile == nil
+		if created {
+			tlsProfile := s.resolveTLSProfileForFrozenClaudeAccount(account, nil)
+			profile = newClaudeFrozenEnvironmentProfile(account, tlsProfile)
+		} else {
+			userAgent, changed := floorClaudeCLIUserAgentVersion(profile.UserAgent)
+			if !changed {
+				s.claudeFrozenProfiles.Store(account.ID, profile)
+				return profile, nil
+			}
+			updated := *profile
+			updated.UserAgent = userAgent
+			profile = &updated
+		}
 		if err := validateClaudeFrozenEnvironmentProfile(profile); err != nil {
 			return nil, err
 		}
@@ -268,7 +293,11 @@ func (s *GatewayService) getOrCreateClaudeFrozenEnvironmentProfile(ctx context.C
 			return nil, fmt.Errorf("persist frozen Claude environment profile: %w", err)
 		}
 		s.claudeFrozenProfiles.Store(account.ID, profile)
-		slog.Info("claude_frozen_environment_profile_created",
+		event := "claude_frozen_environment_profile_version_floored"
+		if created {
+			event = "claude_frozen_environment_profile_created"
+		}
+		slog.Info(event,
 			"account_id", account.ID,
 			"tls_profile", profile.TLSFingerprintName,
 			"proxy_id", profile.ProxyID,

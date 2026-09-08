@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,7 +62,7 @@ func TestIdentityService_ValidatedClaudeClientSeedsAccountFingerprint(t *testing
 	fp, err := svc.GetOrCreateFingerprint(context.Background(), 42, headers)
 
 	require.NoError(t, err)
-	require.Equal(t, "claude-cli/2.1.220 (external, cli)", fp.UserAgent)
+	require.Equal(t, "claude-cli/"+claude.CLICurrentVersion+" (external, cli)", fp.UserAgent)
 	require.Equal(t, "MacOS", fp.StainlessOS)
 	require.Equal(t, "arm64", fp.StainlessArch)
 	require.Equal(t, "v22.14.0", fp.StainlessRuntimeVersion)
