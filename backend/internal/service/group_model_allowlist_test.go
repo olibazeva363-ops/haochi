@@ -100,6 +100,8 @@ func TestGroupModelAllowlistAllows(t *testing.T) {
 		{name: "case-insensitive entry match", model: "Claude-Sonnet-4.5", want: true},
 		{name: "not listed", model: "claude-opus-4.6", want: false},
 		{name: "thinking suffix tolerated via claude normalization", model: "claude-sonnet-4.5-thinking", want: true},
+		{name: "thinking suffix matches case-insensitively", model: " Claude-Sonnet-4.5-ThInKiNg ", want: true},
+		{name: "thinking must be the trailing suffix", model: "claude-sonnet-4.5-thinking-extra", want: false},
 		{name: "gemini models/ prefix stripped", model: "models/gemini-2.5-pro", want: true},
 		{name: "gemini models/ prefix not in list", model: "models/gemini-2.5-flash", want: false},
 		{name: "openai reasoning suffix normalizes to base model", model: "gpt-5.5-codex-high", want: true},
@@ -116,6 +118,18 @@ func TestGroupModelAllowlistAllows(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("thinking aliases still match dated official entries", func(t *testing.T) {
+		cfg := GroupModelAllowlist{Enabled: true, Models: []string{"claude-sonnet-4-5-20250929"}}
+		for _, model := range []string{"claude-sonnet-4.5-thinking", "Claude-Sonnet-4.5-THINKING"} {
+			if !cfg.Allows(model) {
+				t.Errorf("Allows(%q) must match the dated official entry", model)
+			}
+		}
+		if cfg.Allows("claude-sonnet-4.5-thinking-extra") {
+			t.Fatal("a non-trailing thinking suffix must not match the dated official entry")
+		}
+	})
 
 	t.Run("disabled allowlist allows everything", func(t *testing.T) {
 		disabled := GroupModelAllowlist{Enabled: false, Models: []string{"only-model"}}
@@ -206,6 +220,17 @@ func TestGroupModelAllowlistFilterForListing(t *testing.T) {
 		want := []string{"claude-sonnet-4.5-thinking"}
 		if strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Fatalf("got %#v want %#v", got, want)
+		}
+	})
+
+	t.Run("thinking aliases preserve spelling against public and official sources", func(t *testing.T) {
+		entry := "Claude-Sonnet-4.5-ThInKiNg"
+		cfg := GroupModelAllowlist{Enabled: true, Models: []string{entry, "claude-sonnet-4.5-thinking-extra"}}
+		for _, sourceModel := range []string{"claude-sonnet-4.5", "claude-sonnet-4-5-20250929"} {
+			got := cfg.FilterForListing([]string{sourceModel})
+			if len(got) != 1 || got[0] != entry {
+				t.Errorf("FilterForListing(%q) = %#v, want only %q", sourceModel, got, entry)
+			}
 		}
 	})
 

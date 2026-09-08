@@ -5196,6 +5196,13 @@ const resetModelAllowlistState = (
   state.enabled = fresh.enabled;
   state.savedModels = fresh.savedModels;
   state.items = fresh.items;
+  if (state === createModelAllowlistState) {
+    createAllowlistCustomEntry.value = "";
+    createAllowlistCustomErrorKey.value = null;
+  } else {
+    editAllowlistCustomEntry.value = "";
+    editAllowlistCustomErrorKey.value = null;
+  }
 };
 
 const loadModelAllowlistCandidates = async (

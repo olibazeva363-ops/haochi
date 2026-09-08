@@ -71,7 +71,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 
 	// Extract model and stream
 	modelResult := gjson.GetBytes(body, "model")
-	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
+	if !modelResult.Exists() || modelResult.Type != gjson.String || strings.TrimSpace(modelResult.String()) == "" {
 		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}

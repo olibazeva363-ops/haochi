@@ -1084,7 +1084,7 @@ export default {
         emptySelectionError: 'The model allowlist is enabled; select or add at least one model entry',
         errors: {
           empty: 'Please enter a model entry',
-          invalidWildcard: 'Wildcard * is only allowed at the end of an entry',
+          invalid_wildcard: 'Wildcard * is only allowed at the end of an entry',
           duplicate: 'This entry already exists'
         }
       },

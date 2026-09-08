@@ -1081,7 +1081,7 @@ export default {
         emptySelectionError: '模型白名单已开启，请至少选择或添加一个模型条目',
         errors: {
           empty: '请输入模型条目',
-          invalidWildcard: '通配符 * 只能出现在条目末尾',
+          invalid_wildcard: '通配符 * 只能出现在条目末尾',
           duplicate: '该条目已存在'
         }
       },

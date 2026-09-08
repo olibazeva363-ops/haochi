@@ -49,6 +49,9 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	if strings.TrimSpace(model) == "" {
 		model = "grok-voice-latest"
 	}
+	if !checkGatewayModelAllowlist(c, apiKey.Group, clientRequestedModel(c, model)) {
+		return
+	}
 	// Keep the HTTP response uncommitted while selecting and probing an account.
 	// Realtime is not an HTTP streaming response; using reqStream=true here would
 	// let the wait queue flush an SSE ping before the WebSocket handshake succeeds.

@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AdminGroup } from '@/types'
 import GroupsView from '@/views/admin/GroupsView.vue'
 import { adminAPI } from '@/api/admin'
+import enAdminOverview from '@/i18n/locales/en/admin/overview'
+import zhAdminOverview from '@/i18n/locales/zh/admin/overview'
 
 const {
   listGroups,
@@ -14,6 +16,7 @@ const {
   getUsageSummary,
   getCapacitySummary,
   getLiveCapability,
+  translate,
   showSuccess,
   showError
 } = vi.hoisted(() => ({
@@ -24,6 +27,7 @@ const {
   getUsageSummary: vi.fn(),
   getCapacitySummary: vi.fn(),
   getLiveCapability: vi.fn(),
+  translate: vi.fn((key: string) => key),
   showSuccess: vi.fn(),
   showError: vi.fn()
 }))
@@ -65,7 +69,7 @@ vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {
     ...actual,
-    useI18n: () => ({ t: (key: string) => key })
+    useI18n: () => ({ t: translate })
   }
 })
 
@@ -172,6 +176,7 @@ function mountView() {
 describe('GroupsView duplicate action', () => {
   beforeEach(() => {
     localStorage.clear()
+    translate.mockReset().mockImplementation((key: string) => key)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     for (const fn of [
       listGroups,
@@ -302,6 +307,83 @@ describe('GroupsView duplicate action', () => {
     expect(updateGroup).toHaveBeenCalledTimes(1)
     expect(showError).toHaveBeenCalledWith('group name already exists')
     wrapper.unmount()
+  })
+
+  it.each([
+    ['create', 'en', 'Wildcard * is only allowed at the end of an entry'],
+    ['edit', 'en', 'Wildcard * is only allowed at the end of an entry'],
+    ['create', 'zh', '通配符 * 只能出现在条目末尾'],
+    ['edit', 'zh', '通配符 * 只能出现在条目末尾']
+  ] as const)('translates invalid wildcard errors in the %s form for %s', async (mode, locale, message) => {
+    const errors = (locale === 'en' ? enAdminOverview : zhAdminOverview).groups.modelAllowlist.errors
+    const errorMessages = Object.fromEntries(Object.entries(errors).map(([code, text]) => [
+      `admin.groups.modelAllowlist.errors.${code}`, text
+    ]))
+    translate.mockImplementation((key: string) => errorMessages[key] ?? key)
+    const wrapper = mountView()
+    try {
+      await flushPromises()
+      if (mode === 'create') {
+        await wrapper.get('[data-tour="groups-create-btn"]').trigger('click')
+      } else {
+        const editButton = wrapper.findAll('button').find((button) => button.text() === 'common.edit')!
+        await editButton.trigger('click')
+      }
+      await flushPromises()
+
+      const form = wrapper.get(`#${mode}-group-form`)
+      const allowlistLabel = form.findAll('label').find((label) => label.text() === 'admin.groups.modelAllowlist.title')!
+      const allowlistSection = allowlistLabel.element.closest('.border-t')!
+      const toggle = form.findAll('[role="switch"]').find((button) => allowlistSection.contains(button.element))!
+      await toggle.trigger('click')
+      const input = form.get('input[placeholder="admin.groups.modelAllowlist.customPlaceholder"]')
+      await input.setValue('gpt-*-5.4')
+      await input.trigger('keydown', { key: 'Enter' })
+
+      expect(form.text()).toContain(message)
+      expect(form.text()).not.toContain('admin.groups.modelAllowlist.errors.invalid_wildcard')
+      expect(form.findAll('input[type="checkbox"]').some((checkbox) => checkbox.element.parentElement?.textContent?.includes('gpt-*-5.4'))).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('clears the custom allowlist draft and error when switching groups after closing', async () => {
+    listGroups.mockResolvedValue({
+      items: [
+        { ...sourceGroup, model_allowlist: { enabled: true, models: ['gpt-5.4'] } },
+        { ...sourceGroup, id: 43, name: 'Secondary', model_allowlist: { enabled: true, models: ['gpt-5.5'] } }
+      ],
+      total: 2,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    try {
+      await flushPromises()
+      const editButtons = wrapper.findAll('button').filter((button) => button.text() === 'common.edit')
+      await editButtons[0].trigger('click')
+      await flushPromises()
+      const inputSelector = 'input[placeholder="admin.groups.modelAllowlist.customPlaceholder"]'
+      const input = wrapper.get(inputSelector)
+      await input.setValue('gpt-*-5.4')
+      await input.trigger('keydown', { key: 'Enter' })
+      expect(wrapper.get('#edit-group-form').text()).toContain('admin.groups.modelAllowlist.errors.invalid_wildcard')
+
+      const cancelButton = wrapper.findAll('button').find((button) => button.text() === 'common.cancel')!
+      await cancelButton.trigger('click')
+      expect(wrapper.find('#edit-group-form').exists()).toBe(false)
+      await editButtons[1].trigger('click')
+      await flushPromises()
+
+      expect(getModelAllowlistCandidates).toHaveBeenLastCalledWith(43, 'openai')
+      expect(wrapper.get<HTMLInputElement>(inputSelector).element.value).toBe('')
+      expect(wrapper.get('#edit-group-form').text()).not.toContain('admin.groups.modelAllowlist.errors.invalid_wildcard')
+      expect(wrapper.get('#edit-group-form').text()).toContain('gpt-5.5')
+    } finally {
+      wrapper.unmount()
+    }
   })
 
   it('updates manifest controls immediately and submits the displayed selection', async () => {

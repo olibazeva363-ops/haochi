@@ -127,7 +127,7 @@ func (a GroupModelAllowlist) Allows(model string) bool {
 
 // groupModelAllowlistCandidates 返回客户端模型名在白名单匹配中的候选形式（均已小写）。
 func groupModelAllowlistCandidates(model string) []string {
-	candidates := make([]string, 0, 4)
+	candidates := make([]string, 0, 5)
 	add := func(value string) {
 		value = strings.ToLower(strings.TrimSpace(value))
 		if value == "" {
@@ -143,7 +143,9 @@ func groupModelAllowlistCandidates(model string) []string {
 
 	add(model)
 	add(strings.TrimPrefix(model, "models/"))
-	add(claude.NormalizeModelID(strings.TrimSuffix(model, "-thinking")))
+	claudeBaseModel := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(model)), "-thinking")
+	add(claudeBaseModel)
+	add(claude.NormalizeModelID(claudeBaseModel))
 	add(NormalizeOpenAICompatRequestedModel(model))
 	return candidates
 }
@@ -217,12 +219,11 @@ func allowlistSourcePatternAllowsModel(patterns []string, model string) bool {
 			return true
 		}
 	}
-	normalizedClaudeModel := claude.NormalizeModelID(strings.TrimSuffix(model, "-thinking"))
-	if !strings.EqualFold(normalizedClaudeModel, model) {
-		for _, pattern := range patterns {
-			if strings.EqualFold(pattern, normalizedClaudeModel) {
-				return true
-			}
+	claudeBaseModel := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(model)), "-thinking")
+	normalizedClaudeModel := claude.NormalizeModelID(claudeBaseModel)
+	for _, pattern := range patterns {
+		if strings.EqualFold(pattern, claudeBaseModel) || strings.EqualFold(pattern, normalizedClaudeModel) {
+			return true
 		}
 	}
 	return false
