@@ -907,9 +907,17 @@ ops:
   # 是否启用运维监控功能（后台任务和接口）
   # Set to false to hide ops menu in sidebar and disable all ops features
   # 设置为 false 可在左侧栏隐藏运维监控菜单并禁用所有运维监控功能
-  # Other detailed settings (cleanup, aggregation, etc.) are configured in ops settings dialog
-  # 其他详细设置（数据清理、预聚合等）在运维监控设置对话框中配置
   enabled: true
+  # Deployment baselines for scheduled cleanup. Saved admin settings override
+  # enabled/schedule, and the System Logs runtime retention overrides the value below.
+  # 定时清理的部署基线。管理端保存的设置会覆盖 enabled/schedule，
+  # “系统日志”中的运行时保留天数会覆盖下面的值。
+  cleanup:
+    enabled: true
+    schedule: "0 2 * * *"
+    # Resetting the runtime log config returns to this baseline (days).
+    # 重置运行时日志配置后会回到此保留期基线（天）。
+    system_log_retention_days: 30
 
 # =============================================================================
 # JWT Configuration

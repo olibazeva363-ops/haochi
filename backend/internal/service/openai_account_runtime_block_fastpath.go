@@ -233,11 +233,13 @@ func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context
 		cooldownUntil = *resetAt
 	} else if s.rateLimitService != nil {
 		cooldown, ok := s.rateLimitService.get429FallbackCooldown(ctx, account)
-		if !ok || cooldown <= 0 {
+		if (!ok || cooldown <= 0) && disposition == openAIOAuth429Transient {
 			s.openaiOAuth429RetryStartedAt.Delete(account.ID)
 			return
 		}
-		cooldownUntil = now.Add(cooldown)
+		if ok && cooldown > 0 {
+			cooldownUntil = now.Add(cooldown)
+		}
 	}
 	s.BlockAccountScheduling(account, cooldownUntil, "429")
 	s.openaiOAuth429RetryStartedAt.Delete(account.ID)

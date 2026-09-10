@@ -104,11 +104,15 @@ func TestOpenAIGatewayHandlerImages_ModelAllowlistAfterDefaults(t *testing.T) {
 	tests := []struct {
 		name     string
 		allowed  string
+		model    string
 		alias    string
 		wantDeny bool
 	}{
 		{name: "omitted model denied", allowed: "gpt-image-1", wantDeny: true},
 		{name: "omitted model allowed", allowed: "gpt-image-2"},
+		{name: "image 2.5 flare allowed", allowed: "gpt-image-2.5-flare", model: "gpt-image-2.5-flare"},
+		{name: "image 2.5 sunburst snapshot allowed", allowed: "gpt-image-2.5-sunburst-2026-09-08", model: "gpt-image-2.5-sunburst-2026-09-08"},
+		{name: "image 2.5 blocked by old allowlist", allowed: "gpt-image-2", model: "gpt-image-2.5-flare", wantDeny: true},
 		{name: "composite public alias allowed", allowed: "public-image", alias: "public-image"},
 		{name: "upstream model does not allow blocked public alias", allowed: "gpt-image-2", alias: "public-image", wantDeny: true},
 	}
@@ -119,7 +123,7 @@ func TestOpenAIGatewayHandlerImages_ModelAllowlistAfterDefaults(t *testing.T) {
 					ID: 3, Platform: service.PlatformOpenAI, AllowImageGeneration: true,
 					ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{tt.allowed}},
 				}
-				model := ""
+				model := tt.model
 				if tt.alias != "" {
 					group.Platform = service.PlatformComposite
 					model = "gpt-image-2"
@@ -135,7 +139,10 @@ func TestOpenAIGatewayHandlerImages_ModelAllowlistAfterDefaults(t *testing.T) {
 				h.Images(c)
 
 				if tt.wantDeny {
-					blocked := "gpt-image-2"
+					blocked := model
+					if blocked == "" {
+						blocked = "gpt-image-2"
+					}
 					if tt.alias != "" {
 						blocked = tt.alias
 					}
@@ -146,7 +153,11 @@ func TestOpenAIGatewayHandlerImages_ModelAllowlistAfterDefaults(t *testing.T) {
 				require.Equal(t, 1, upstream.calls, rec.Body.String())
 				require.Equal(t, http.StatusBadRequest, rec.Code)
 				require.Contains(t, rec.Body.String(), "allowlist upstream reached")
-				require.Contains(t, string(upstream.body), "gpt-image-2")
+				forwardedModel := model
+				if forwardedModel == "" {
+					forwardedModel = "gpt-image-2"
+				}
+				require.Contains(t, string(upstream.body), forwardedModel)
 				_, marked := middleware2.GetIngressRejectReason(c)
 				require.False(t, marked)
 			})
@@ -156,14 +167,26 @@ func TestOpenAIGatewayHandlerImages_ModelAllowlistAfterDefaults(t *testing.T) {
 
 func TestAsyncImageHandlerSubmit_ModelAllowlistBeforeTaskCreation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name     string
+		allowed  string
+		model    string
+		wantDeny bool
+	}{
+		{name: "default denied", allowed: "gpt-image-1", wantDeny: true},
+		{name: "default allowed", allowed: "gpt-image-2"},
+		{name: "image 2.5 flare allowed", allowed: "gpt-image-2.5-flare", model: "gpt-image-2.5-flare"},
+		{name: "image 2.5 sunburst snapshot allowed", allowed: "gpt-image-2.5-sunburst-2026-09-08", model: "gpt-image-2.5-sunburst-2026-09-08"},
+		{name: "image 2.5 blocked by old allowlist", allowed: "gpt-image-2", model: "gpt-image-2.5-flare", wantDeny: true},
+	}
 	for _, path := range []string{"/v1/images/generations/async", "/v1/images/edits/async"} {
-		for _, allowed := range []string{"gpt-image-1", "gpt-image-2"} {
-			t.Run(path+"/"+allowed, func(t *testing.T) {
+		for _, tt := range tests {
+			t.Run(path+"/"+tt.name, func(t *testing.T) {
 				group := &service.Group{
 					ID: 3, Platform: service.PlatformOpenAI, AllowImageGeneration: true,
-					ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{allowed}},
+					ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{tt.allowed}},
 				}
-				body, contentType := imageAllowlistRequest(t, path, "")
+				body, contentType := imageAllowlistRequest(t, path, tt.model)
 				c, rec := imageAllowlistContext(path, contentType, body, group)
 				store := &asyncImageMemoryStore{tasks: make(map[string]*service.ImageTaskRecord)}
 				tasks := service.NewImageTaskServiceWithUploader(store, nil, time.Hour, time.Minute)
@@ -182,8 +205,12 @@ func TestAsyncImageHandlerSubmit_ModelAllowlistBeforeTaskCreation(t *testing.T) 
 
 				h.Submit(c)
 
-				if allowed != "gpt-image-2" {
-					requireImageAllowlistDenied(t, c, rec, "gpt-image-2")
+				expectedModel := tt.model
+				if expectedModel == "" {
+					expectedModel = "gpt-image-2"
+				}
+				if tt.wantDeny {
+					requireImageAllowlistDenied(t, c, rec, expectedModel)
 					store.mu.RLock()
 					count := len(store.tasks)
 					store.mu.RUnlock()
@@ -202,7 +229,7 @@ func TestAsyncImageHandlerSubmit_ModelAllowlistBeforeTaskCreation(t *testing.T) 
 					task, err := tasks.Get(context.Background(), service.ImageTaskOwner{UserID: 7, APIKeyID: 9}, taskID)
 					return err == nil && task.Status == service.ImageTaskStatusCompleted
 				}, time.Second, 10*time.Millisecond)
-				require.Equal(t, "gpt-image-2", <-executed)
+				require.Equal(t, expectedModel, <-executed)
 			})
 		}
 	}

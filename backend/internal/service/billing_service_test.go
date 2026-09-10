@@ -966,6 +966,35 @@ func TestComputeTokenBreakdown_GptImage2ImageEditIssue4386(t *testing.T) {
 	require.InDelta(t, wantImageOutput, cost.ImageOutputCost, 1e-15)
 	require.InDelta(t, 0.016081, cost.TotalCost, 1e-9, "总额应为 $0.016081（修复前为 $0.015025）")
 }
+
+func TestCalculateCost_GPTImage25PreservesTokenHubImageInputBilling(t *testing.T) {
+	pricingService := &PricingService{pricingData: map[string]*LiteLLMModelPricing{}}
+	svc := NewBillingService(&config.Config{}, pricingService)
+	tokens := UsageTokens{
+		InputTokens:       371,
+		ImageInputTokens:  352,
+		OutputTokens:      439,
+		ImageOutputTokens: 439,
+	}
+
+	for _, model := range []string{
+		"gpt-image-2.5-flare",
+		"gpt-image-2.5-sunburst",
+		"gpt-image-2.5-flare-2026-09-08",
+		"gpt-image-2.5-sunburst-2026-09-08",
+	} {
+		t.Run(model, func(t *testing.T) {
+			cost, err := svc.CalculateCost(model, tokens, 1)
+			require.NoError(t, err)
+			require.InDelta(t, float64(19)*5e-6, cost.InputCost, 1e-15)
+			require.InDelta(t, float64(352)*8e-6, cost.ImageInputCost, 1e-15)
+			require.Zero(t, cost.OutputCost)
+			require.InDelta(t, float64(439)*30e-6, cost.ImageOutputCost, 1e-15)
+			require.InDelta(t, 0.016081, cost.TotalCost, 1e-9)
+		})
+	}
+}
+
 func TestCalculateImageCost(t *testing.T) {
 	svc := newTestBillingService()
 

@@ -84,6 +84,42 @@ func TestOpenAIImagesRejectedDriverDoesNotCoolImageModel(t *testing.T) {
 	}
 }
 
+func TestForwardOpenAIImagesOAuthRejectedDriverBypassesFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("SUB2API_IMAGES_MAIN_MODEL", "gpt-5.4-mini")
+	requestBody := []byte(`{"model":"gpt-image-2.5-flare","prompt":"draw a red cup","response_format":"b64_json"}`)
+	c, recorder := newOpenAIImagesTestContext(t, requestBody)
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Header: http.Header{
+			"Content-Type": []string{"application/json"},
+			"X-Request-Id": []string{"req_images_driver_rejected"},
+		},
+		Body: io.NopCloser(strings.NewReader(`{"error":{"message":"The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account.","type":"invalid_request_error"}}`)),
+	}}
+	repo := &modelNotFoundAccountRepoStub{}
+	svc := newOpenAIImagesTestService(upstream)
+	svc.accountRepo = repo
+	svc.rateLimitService = &RateLimitService{accountRepo: repo}
+	parsed, err := svc.ParseOpenAIImagesRequest(c, requestBody)
+	require.NoError(t, err)
+	account := openAICodexPlanGatedOAuthAccount()
+	account.Credentials["access_token"] = "token-123"
+
+	result, err := svc.ForwardImages(WithOpenAIImagesEndpoint(context.Background()), c, account, requestBody, parsed, "")
+
+	require.Nil(t, result)
+	var upstreamErr *OpenAIImagesUpstreamError
+	require.ErrorAs(t, err, &upstreamErr)
+	require.Equal(t, http.StatusBadRequest, upstreamErr.StatusCode)
+	require.Contains(t, upstreamErr.Message, "gpt-5.4-mini")
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "gpt-5.4-mini")
+	require.Empty(t, repo.modelRateLimitCalls, "the Responses driver error must not cool the requested image model")
+	require.Zero(t, repo.tempCalls)
+	require.Equal(t, "gpt-5.4-mini", gjson.GetBytes(upstream.lastBody, "model").String())
+}
+
 func TestGPTImage25PricingDoesNotUseLegacyImageRates(t *testing.T) {
 	for _, model := range []string{"gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare-2026-09-08", "gpt-image-2.5-sunburst-2026-09-08"} {
 		svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{"gpt-image-2": {InputCostPerToken: 2.5e-6, OutputCostPerImageToken: 15e-6}}}

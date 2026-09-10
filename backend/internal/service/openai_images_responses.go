@@ -981,9 +981,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 	// A retired/configured Responses driver is not an image-model quota failure.
 	// Surface the actionable upstream error instead of cooling every image account
 	// and eventually hiding the configuration problem behind a generic 503.
-	if account.IsOpenAIOAuthLike() &&
-		isOpenAICodexPlanGatedModelError(resp.StatusCode, body) &&
-		strings.Contains(extractUpstreamErrorMessage(body), "'"+openAIImagesResponsesMainModelValue()+"'") {
+	if isOpenAIImagesResponsesMainModelError(account, resp.StatusCode, body) {
 		upErr := openAIImagesUpstreamErrorFromHTTP(resp.StatusCode, resp.Header, body)
 		writeOpenAIImagesUpstreamErrorResponse(c, upErr)
 		return nil, upErr
@@ -1029,6 +1027,13 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 	upErr := openAIImagesUpstreamErrorFromHTTP(resp.StatusCode, resp.Header, body)
 	writeOpenAIImagesUpstreamErrorResponse(c, upErr)
 	return nil, upErr
+}
+
+func isOpenAIImagesResponsesMainModelError(account *Account, statusCode int, body []byte) bool {
+	if account == nil || !account.IsOpenAIOAuthLike() || !isOpenAICodexPlanGatedModelError(statusCode, body) {
+		return false
+	}
+	return strings.Contains(extractUpstreamErrorMessage(body), "'"+openAIImagesResponsesMainModelValue()+"'")
 }
 
 func buildOpenAIImagesAPIResponse(
@@ -1872,6 +1877,9 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+		if isOpenAIImagesResponsesMainModelError(account, resp.StatusCode, respBody) {
+			return s.handleOpenAIImagesErrorResponse(upstreamCtx, resp, c, account, requestModel)
+		}
 		if s.shouldFailoverOpenAIUpstreamResponse(account, resp.StatusCode, upstreamMsg, respBody) {
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 				ProxyID:            opsUpstreamProxyID(account),
