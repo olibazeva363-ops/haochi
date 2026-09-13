@@ -242,6 +242,18 @@ func (l *openAIWSConnLease) ReadMessageWithContextTimeout(ctx context.Context, t
 	return conn.readMessageWithContextTimeout(ctx, timeout)
 }
 
+// ReadMessageForDrain lets HTTP ingress acknowledge client cancellation before
+// resuming with a detached drain context. The resident reader owns the socket
+// independently, so canceling this wait does not corrupt a frame. Deadlines
+// still abort the connection, including the bounded drain deadline.
+func (l *openAIWSConnLease) ReadMessageForDrain(ctx context.Context, timeout time.Duration) ([]byte, error) {
+	conn, err := l.activeConn()
+	if err != nil {
+		return nil, err
+	}
+	return conn.readMessageWithContextTimeoutPolicy(ctx, timeout, true)
+}
+
 func (l *openAIWSConnLease) PingWithTimeout(timeout time.Duration) error {
 	conn, err := l.activeConn()
 	if err != nil {
@@ -609,6 +621,10 @@ func (c *openAIWSConn) readMessageWithTimeout(timeout time.Duration) ([]byte, er
 }
 
 func (c *openAIWSConn) readMessageWithContextTimeout(parent context.Context, timeout time.Duration) ([]byte, error) {
+	return c.readMessageWithContextTimeoutPolicy(parent, timeout, false)
+}
+
+func (c *openAIWSConn) readMessageWithContextTimeoutPolicy(parent context.Context, timeout time.Duration, preserveOnCancel bool) ([]byte, error) {
 	if c == nil {
 		return nil, errOpenAIWSConnClosed
 	}
@@ -625,14 +641,18 @@ func (c *openAIWSConn) readMessageWithContextTimeout(parent context.Context, tim
 		parent = context.Background()
 	}
 	if timeout <= 0 {
-		return c.readMessage(parent)
+		return c.readMessageWithCancelPolicy(parent, preserveOnCancel)
 	}
 	readCtx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	return c.readMessage(readCtx)
+	return c.readMessageWithCancelPolicy(readCtx, preserveOnCancel)
 }
 
 func (c *openAIWSConn) readMessage(readCtx context.Context) ([]byte, error) {
+	return c.readMessageWithCancelPolicy(readCtx, false)
+}
+
+func (c *openAIWSConn) readMessageWithCancelPolicy(readCtx context.Context, preserveOnCancel bool) ([]byte, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 	if c.ws == nil {
@@ -657,6 +677,9 @@ func (c *openAIWSConn) readMessage(readCtx context.Context) ([]byte, error) {
 		c.touch()
 		return payload, nil
 	case <-readCtx.Done():
+		if preserveOnCancel && errors.Is(readCtx.Err(), context.Canceled) {
+			return nil, readCtx.Err()
+		}
 		// 与库在 ctx 取消时切断连接的语义一致：读超时后消息边界已不可信，且对端多半
 		// 已不响应，直接切断而不做关闭握手。
 		c.abort()

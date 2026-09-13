@@ -269,6 +269,9 @@ func (r *ModelPricingResolver) applyTokenOverrides(chPricing *ChannelModelPricin
 // 与 image_output 不同，此处不设 Explicit 标志——图片输入未配置应回退文本价，
 // 而非硬置 0。
 func applyChannelImageInputPrice(chPricing *ChannelModelPricing, pricing *ModelPricing) {
+	// Custom cards share cache_read across text and image tokens. Do not retain
+	// the catalogue's separate image-cache rate, including for an explicit zero.
+	pricing.ImageCacheReadPricePerToken = 0
 	if chPricing != nil && chPricing.ImageInputPrice != nil {
 		pricing.ImageInputPricePerToken = *chPricing.ImageInputPrice
 	} else {

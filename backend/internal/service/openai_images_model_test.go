@@ -106,7 +106,10 @@ func TestForwardOpenAIImagesOAuthRejectedDriverBypassesFailover(t *testing.T) {
 	account := openAICodexPlanGatedOAuthAccount()
 	account.Credentials["access_token"] = "token-123"
 
-	result, err := svc.ForwardImages(WithOpenAIImagesEndpoint(context.Background()), c, account, requestBody, parsed, "")
+	// Image 2.5 now uses the native endpoint first. Exercise the Responses path
+	// that remains available when the native endpoint returns 404/405.
+	ctx := withOpenAIImagesForceResponses(WithOpenAIImagesEndpoint(context.Background()))
+	result, err := svc.ForwardImages(ctx, c, account, requestBody, parsed, "")
 
 	require.Nil(t, result)
 	var upstreamErr *OpenAIImagesUpstreamError
@@ -117,6 +120,7 @@ func TestForwardOpenAIImagesOAuthRejectedDriverBypassesFailover(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), "gpt-5.4-mini")
 	require.Empty(t, repo.modelRateLimitCalls, "the Responses driver error must not cool the requested image model")
 	require.Zero(t, repo.tempCalls)
+	require.Equal(t, "/backend-api/codex/responses", upstream.lastReq.URL.Path)
 	require.Equal(t, "gpt-5.4-mini", gjson.GetBytes(upstream.lastBody, "model").String())
 }
 

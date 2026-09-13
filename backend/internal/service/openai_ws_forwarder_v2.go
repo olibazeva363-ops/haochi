@@ -542,7 +542,7 @@ readLoop:
 					currentReadTimeout = remaining
 				}
 			}
-			message, readErr = lease.ReadMessageWithContextTimeout(upstreamReadCtx, currentReadTimeout)
+			message, readErr = lease.ReadMessageForDrain(upstreamReadCtx, currentReadTimeout)
 			if readErr == nil {
 				if documents, repaired := splitOpenAIConcatenatedJSONDocuments(message); repaired {
 					logOpenAIWSModeInfo(
@@ -578,6 +578,11 @@ readLoop:
 			return nil, errors.New("upstream websocket returned malformed Responses event JSON after downstream output")
 		}
 		if readErr != nil {
+			if clientDisconnected && !readUsedDetachedContext && errors.Is(readErr, context.Canceled) && clientRequestCanceled() {
+				// The reader loop keeps the socket open while this request switches
+				// to its bounded drain context; evicting here would discard usage.
+				continue
+			}
 			lease.MarkBroken()
 			closeStatus, closeReason := summarizeOpenAIWSReadCloseError(readErr)
 			logOpenAIWSModeInfo(
@@ -597,9 +602,6 @@ readLoop:
 				truncateOpenAIWSLogValue(lastEventType, openAIWSLogValueMaxLen),
 			)
 			if clientDisconnected {
-				if !readUsedDetachedContext && errors.Is(readErr, context.Canceled) && clientRequestCanceled() {
-					continue
-				}
 				break
 			}
 			if !wroteDownstream {
