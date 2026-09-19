@@ -1136,40 +1136,58 @@ describe("admin SettingsView payment visible method controls", () => {
     );
   });
 
-  it("submits Claude OAuth system prompt injection gateway settings", async () => {
-    const blocks = `[{"type":"text","text":"custom block","cache_control":true}]`;
+  it("ignores retired Claude OAuth prompt rewrite settings", async () => {
     getSettings.mockResolvedValueOnce({
       ...baseSettingsResponse,
-      enable_claude_oauth_system_prompt_injection: false,
-      claude_oauth_system_prompt_blocks: blocks,
+      enable_cch_signing: true,
+      enable_claude_oauth_system_prompt_injection: true,
+      claude_oauth_system_prompt: "legacy expansion prompt",
+      claude_oauth_system_prompt_blocks:
+        `[{"type":"text","text":"legacy system block"}]`,
+      enable_client_dateline_normalization: true,
+      enable_anthropic_cache_ttl_1h_injection: true,
+      rewrite_message_cache_control: true,
     });
 
     const wrapper = mountView();
 
     await flushPromises();
+    await openGatewayTab(wrapper);
+
+    const gatewayText = wrapper.text();
+    expect(gatewayText).not.toContain(
+      "admin.settings.gatewayForwarding.cchSigning",
+    );
+    expect(gatewayText).not.toContain(
+      "admin.settings.gatewayForwarding.claudeOAuthSystemPromptInjection",
+    );
+    expect(gatewayText).not.toContain(
+      "admin.settings.gatewayForwarding.claudeOAuthSystemPromptBlocks",
+    );
+    expect(gatewayText).not.toContain(
+      "admin.settings.gatewayForwarding.clientDatelineNormalization",
+    );
+
     await wrapper.find("form").trigger("submit.prevent");
     await flushPromises();
 
     expect(updateSettings).toHaveBeenCalledTimes(1);
-    expect(updateSettings).toHaveBeenCalledWith(
+    const payload = updateSettings.mock.calls[0][0] as Record<string, unknown>;
+    for (const key of [
+      "enable_cch_signing",
+      "enable_claude_oauth_system_prompt_injection",
+      "claude_oauth_system_prompt",
+      "claude_oauth_system_prompt_blocks",
+      "enable_client_dateline_normalization",
+    ]) {
+      expect(payload).not.toHaveProperty(key);
+    }
+    expect(payload).toEqual(
       expect.objectContaining({
-        enable_claude_oauth_system_prompt_injection: false,
+        enable_anthropic_cache_ttl_1h_injection: true,
+        rewrite_message_cache_control: true,
       }),
     );
-    const payload = updateSettings.mock.calls[0][0] as {
-      claude_oauth_system_prompt_blocks: string;
-    };
-    expect(JSON.parse(payload.claude_oauth_system_prompt_blocks)).toEqual([
-      {
-        enabled: true,
-        type: "text",
-        text: "custom block",
-        cache_control: {
-          type: "ephemeral",
-          ttl: "5m",
-        },
-      },
-    ]);
   });
 
   it("submits Antigravity user agent version gateway setting", async () => {

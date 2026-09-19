@@ -20,6 +20,12 @@ type ResponsesClientToolMapping struct {
 // ordinary function tools. It mutates req and returns the mapping required to
 // restore the upstream response.
 func AdaptResponsesClientTools(req map[string]any) (ResponsesClientToolMapping, bool, error) {
+	return AdaptResponsesClientToolsWithOptions(req, RequestConversionOptions{})
+}
+
+// AdaptResponsesClientToolsWithOptions lowers client tools without adding tool
+// descriptions when PreserveClientText is enabled. Caller descriptions remain intact.
+func AdaptResponsesClientToolsWithOptions(req map[string]any, opts RequestConversionOptions) (ResponsesClientToolMapping, bool, error) {
 	if req == nil {
 		return ResponsesClientToolMapping{}, false, nil
 	}
@@ -99,6 +105,9 @@ func AdaptResponsesClientTools(req map[string]any) (ResponsesClientToolMapping, 
 			copy := copyClientTool(tool)
 			copy["type"] = "function"
 			copy["parameters"] = json.RawMessage(customToolInputSchema)
+			if opts.PreserveClientText {
+				copy["parameters"] = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}`)
+			}
 			delete(copy, "format")
 			adapter.CustomTools[name] = true
 			lowered = append(lowered, copy)
@@ -109,11 +118,19 @@ func AdaptResponsesClientTools(req map[string]any) (ResponsesClientToolMapping, 
 				continue
 			}
 			seenSearch = true
-			lowered = append(lowered, map[string]any{
+			searchTool := map[string]any{
 				"type": "function", "name": toolSearchProxyName,
 				"description": "Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.",
 				"parameters":  json.RawMessage(toolSearchProxySchema),
-			})
+			}
+			if opts.PreserveClientText {
+				delete(searchTool, "description")
+				if description, supplied := tool["description"]; supplied {
+					searchTool["description"] = description
+				}
+				searchTool["parameters"] = json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}`)
+			}
+			lowered = append(lowered, searchTool)
 			changed = true
 		default:
 			lowered = append(lowered, raw)

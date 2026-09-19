@@ -56,9 +56,9 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// OAuth账号：应用统一指纹和metadata重写（受设置开关控制）
 	var fingerprint *Fingerprint
 	var frozenProfile *ClaudeFrozenEnvironmentProfile
-	enableFP, enableMPT, enableCCH := true, false, false
+	enableFP, enableMPT := true, false
 	if s.settingService != nil {
-		enableFP, enableMPT, enableCCH = s.settingService.GetGatewayForwardingSettings(ctx)
+		enableFP, enableMPT, _ = s.settingService.GetGatewayForwardingSettings(ctx)
 	}
 	if tokenType == "oauth" && mimicClaudeCode && enableFP {
 		profile, err := s.getOrCreateClaudeFrozenEnvironmentProfile(ctx, account)
@@ -102,26 +102,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		}
 	}
 
-	// Mimicry may override the cached User-Agent later, even without a fingerprint.
-	billingUA := effectiveBillingUserAgent(tokenType, mimicClaudeCode, fingerprint)
-	if frozenProfile != nil {
-		billingUA = frozenProfile.UserAgent
-	}
-	if billingUA != "" {
-		body = syncBillingHeaderVersion(body, billingUA)
-	}
-
-	// === 计算最终 anthropic-beta header（先于 body sanitize 与 CCH 签名）===
-	//
-	// 顺序约束：
-	//   1) 算 finalBeta（纯函数，不依赖 req.Header；mimicry 路径会忽略客户端 beta，
-	//      与原“OAuth + mimicClaudeCode 跳过白名单透传”行为对齐）
-	//   2) 按 finalBeta 做能力维度 body sanitize（如 context-management beta 缺失 →
-	//      strip body.context_management，与 Bedrock 路径对称）
-	//   3) CCH 签名（必须使用 strip 后的 body，否则 hash 与最终 body 不一致 →
-	//      被 Anthropic 判 third-party）
-	//   4) NewRequest（body 至此最终敲定）
-	//   5) 透传白名单 / fingerprint / mimic header / 写入 finalBeta
+	// Preserve caller billing text; OAuth adaptation only changes protocol fields.
 	policyFilterSet := s.getBetaPolicyFilterSet(ctx, c, account, modelID)
 	effectiveDropSet := mergeDropSets(policyFilterSet)
 	finalBetaHeader, finalBetaShouldSet := s.computeFinalAnthropicBeta(
@@ -143,14 +124,8 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		body = sanitized
 	}
 
-	// Clamp the outgoing body before computing its CCH signature.
+	// Clamp the outgoing token budget for the selected upstream.
 	body = clampOllamaCloudAnthropicMessagesMaxTokens(account, account.GetBaseURL(), body)
-
-	// Compatibility mode for Claude Code versions that carry the body-bound CCH
-	// field. Sign only gateway-generated OAuth mimicry, never real client traffic.
-	if tokenType == "oauth" && mimicClaudeCode && enableCCH {
-		body = signBillingHeaderCCH(body)
-	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -519,11 +494,7 @@ func mergeAnthropicBetaDropping(required []string, incoming string, drop map[str
 
 // computeFinalAnthropicBeta 计算发往上游的最终 anthropic-beta header 值。
 //
-// 设计动机：将原本在 buildUpstreamRequest 内联在一起、依赖 req.Header 的
-// anthropic-beta 计算逻辑抽成纯函数。这样调用方可以在 NewRequest 之前
-// 就提前拿到最终 beta header，进而能按它对 body 做能力维度 sanitize 后再做
-// CCH 签名——一举修复了以下之前由顺序依赖导致的能力维度 sanitize
-// 无法部署的问题（签名与最终 body 不一致可以被判 third-party）。
+// 在 NewRequest 之前计算最终 beta header，以便按实际能力过滤上游不支持的字段。
 //
 // 返回 (value, shouldSet)：
 //   - shouldSet=false 意为“不主动设置 anthropic-beta header”，与原代码“
@@ -533,7 +504,7 @@ func mergeAnthropicBetaDropping(required []string, incoming string, drop map[str
 //     全部过滤掉），这与原代码中 setHeaderRaw 的结果一致。
 //
 // clientHeaders 是客户端原始 HTTP header（通常为 c.Request.Header）；nil 时按“客户端
-// 未传”处理。body 是已经 metadata 重写 / billing version sync 之后但未 sanitize 上游
+// 未传”处理。body 是已经 metadata 重写之后但未 sanitize 上游
 // 不兼容字段之前的版本。
 func (s *GatewayService) computeFinalAnthropicBeta(
 	tokenType string,

@@ -145,7 +145,7 @@ func TestClaudeFrozenVersionFloorConcurrentLoadsPreserveProxyUpdate(t *testing.T
 	require.Same(t, profiles[0], cached, "a late transport observation cannot undo the version or proxy update")
 }
 
-func TestClaudeFrozenVersionFloorMatchesWireBillingVersion(t *testing.T) {
+func TestClaudeFrozenVersionFloorPreservesClientBillingVersion(t *testing.T) {
 	account := &Account{ID: 91, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
 	profile := newClaudeFrozenEnvironmentProfile(account, nil)
 	profile.UserAgent = "claude-cli/2.1.220 (external, cli)"
@@ -167,7 +167,6 @@ func TestClaudeFrozenVersionFloorMatchesWireBillingVersion(t *testing.T) {
 	require.Equal(t, "claude-cli/"+claude.CLICurrentVersion+" (external, cli)", getHeaderRaw(req.Header, "User-Agent"))
 	require.Equal(t, "0.94.0", getHeaderRaw(req.Header, "X-Stainless-Package-Version"))
 	billingText := gjson.GetBytes(actualBody, "system.0.text").String()
-	require.Contains(t, billingText, "cc_version="+claude.CLICurrentVersion+".")
-	require.NotContains(t, billingText, "2.1.220")
+	require.Equal(t, gjson.GetBytes(body, "system.0.text").String(), billingText)
 	require.Len(t, repo.updates, 1)
 }

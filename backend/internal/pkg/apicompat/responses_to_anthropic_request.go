@@ -11,7 +11,13 @@ import (
 // enables Anthropic platform groups to accept OpenAI Responses API requests
 // by converting them to the native /v1/messages format before forwarding upstream.
 func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, error) {
-	system, messages, err := convertResponsesInputToAnthropic(req.Instructions, req.Input)
+	return ResponsesToAnthropicRequestWithOptions(req, RequestConversionOptions{})
+}
+
+// ResponsesToAnthropicRequestWithOptions converts protocol fields while optionally
+// preserving caller text without generated placeholders or whitespace trimming.
+func ResponsesToAnthropicRequestWithOptions(req *ResponsesRequest, opts RequestConversionOptions) (*AnthropicRequest, error) {
+	system, messages, err := convertResponsesInputToAnthropicWithOptions(req.Instructions, req.Input, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -101,9 +107,16 @@ func mapResponsesEffortToAnthropic(effort string) string {
 // a Responses API instructions + input array. Returns the system as raw JSON
 // (for Anthropic's polymorphic system field) and a list of Anthropic messages.
 func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMessage) (json.RawMessage, []AnthropicMessage, error) {
+	return convertResponsesInputToAnthropicWithOptions(instructions, inputRaw, RequestConversionOptions{})
+}
+
+func convertResponsesInputToAnthropicWithOptions(instructions string, inputRaw json.RawMessage, opts RequestConversionOptions) (json.RawMessage, []AnthropicMessage, error) {
 	var systemParts []string
-	if strings.TrimSpace(instructions) != "" {
-		systemParts = append(systemParts, strings.TrimSpace(instructions))
+	if !opts.PreserveClientText {
+		instructions = strings.TrimSpace(instructions)
+	}
+	if instructions != "" {
+		systemParts = append(systemParts, instructions)
 	}
 
 	// Try as plain string input.
@@ -152,7 +165,7 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 
 		case item.Type == "function_call_output":
 			// function_call_output → user message with tool_result block
-			contentJSON := responsesFunctionOutputToAnthropicContent(item)
+			contentJSON := responsesFunctionOutputToAnthropicContentWithOptions(item, opts)
 			block := AnthropicContentBlock{
 				Type:      "tool_result",
 				ToolUseID: fromResponsesCallIDToAnthropic(item.CallID),
@@ -241,10 +254,10 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 	return system, messages, nil
 }
 
-func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem) json.RawMessage {
+func responsesFunctionOutputToAnthropicContentWithOptions(item ResponsesInputItem, opts RequestConversionOptions) json.RawMessage {
 	if len(item.outputRaw) == 0 {
 		output := item.Output
-		if output == "" {
+		if output == "" && !opts.PreserveClientText {
 			output = "(empty)"
 		}
 		content, _ := json.Marshal(output)
@@ -271,7 +284,11 @@ func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem) json.Raw
 			return content
 		}
 		if len(parts) == 0 {
-			content, _ := json.Marshal("(empty)")
+			emptyOutput := "(empty)"
+			if opts.PreserveClientText {
+				emptyOutput = ""
+			}
+			content, _ := json.Marshal(emptyOutput)
 			return content
 		}
 	}

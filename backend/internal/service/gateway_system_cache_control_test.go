@@ -20,8 +20,7 @@ import (
 // rewrite_message_cache_control 开关（默认不动客户端断点），system 层却一直没有
 // 对应的保护——mimic 路径无条件剥离，且不打日志、不报错。
 //
-// 剥离在两种情形下都没有成立的前提：注入开启时 system 已被整个替换、客户端断点
-// 早就不在了；注入关闭时 system 是客户端原样，断点就是它的意图。
+// system 文本及缓存断点均由客户端提供，OAuth 适配必须保留。
 
 // 多块 system 各自带断点时，一块都不能少：Anthropic 允许最多 4 个，
 // 真正的上限兜底是 enforceCacheControlLimit 的事，不该在这里提前砍。
@@ -40,30 +39,15 @@ func TestNormalizeClaudeOAuthRequestBody_KeepsEveryClientSystemBreakpoint(t *tes
 	require.Equal(t, "1h", gjson.GetBytes(out, "system.2.cache_control.ttl").String())
 }
 
-// 保留断点不等于放弃 system 文本的规范化：OpenCode 身份句该改的还得改。
-// 这条用例区分「拿掉剥离」与「把整段 normalize 关掉」——后者会让第三方指纹漏上去。
-func TestNormalizeClaudeOAuthRequestBody_StillSanitizesTextWhileKeepingBreakpoint(t *testing.T) {
+// 协议适配必须同时保留客户端身份文字与缓存断点。
+func TestNormalizeClaudeOAuthRequestBody_PreservesIdentityTextAndBreakpoint(t *testing.T) {
 	body := []byte(`{"model":"claude-sonnet-4-6","system":[{"type":"text","text":"You are OpenCode, the best coding agent on the planet.","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`)
 
 	out, _ := normalizeClaudeOAuthRequestBody(body, "claude-sonnet-4-6", claudeOAuthNormalizeOptions{})
 
-	require.Equal(t, strings.TrimSpace(claudeCodeSystemPrompt), gjson.GetBytes(out, "system.0.text").String())
+	require.Equal(t, "You are OpenCode, the best coding agent on the planet.", gjson.GetBytes(out, "system.0.text").String())
 	require.True(t, gjson.GetBytes(out, "system.0.cache_control").Exists(),
-		"文本被规范化，断点仍要留着")
-}
-
-// 注入开启这条路径上，system 是我们自己拼的；blocks 配置里自带的 cache_control
-// 是稳定缓存锚点（对齐真实 CLI 的形态），同样不能在 normalize 里掉。
-func TestNormalizeClaudeOAuthRequestBody_KeepsInjectedSystemBreakpoint(t *testing.T) {
-	body := []byte(`{"model":"claude-sonnet-4-6","system":"client instructions","messages":[{"role":"user","content":"hi"}]}`)
-	rewritten := rewriteSystemForNonClaudeCode(body, "client instructions")
-
-	out, _ := normalizeClaudeOAuthRequestBody(rewritten, "claude-sonnet-4-6", claudeOAuthNormalizeOptions{})
-
-	// 只断言「注入后的 system 仍带着锚点」，不写死是第几块：
-	// 块数与布局由 blocks 配置决定，焊进断言会让配置一改就误报。
-	_, _, _, systemPaths := collectCacheControlPaths(out)
-	require.NotEmpty(t, systemPaths, "注入路径自带的稳定锚点不该在 normalize 里掉")
+		"客户端的文本和断点均应保留")
 }
 
 // count_tokens 是五条出口里唯一没有在自己转发路径上调过 enforceCacheControlLimit 的
@@ -81,7 +65,7 @@ func TestForwardCountTokens_EnforcesCacheControlLimitOnMimicPath(t *testing.T) {
 	c.Request.Header.Set("User-Agent", "third-party-client/1.0")
 
 	// 客户端自己打满 4 个断点：system 一个、messages 三个。
-	// 加上 mimic 注入的 tools[-1] 与 system blocks 自带的锚点，必然超过 4。
+	// 加上 tools[-1] 上的缓存断点后会超过 4。
 	body := []byte(`{"model":"claude-sonnet-4-6",` +
 		`"system":[{"type":"text","text":"stable client prefix","cache_control":{"type":"ephemeral","ttl":"5m"}}],` +
 		`"tools":[{"name":"probe","description":"d","input_schema":{"type":"object"}}],` +

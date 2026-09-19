@@ -14,26 +14,13 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
-	"github.com/cespare/xxhash/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-func requireClaudeWireCCH(t *testing.T, body []byte) {
-	t.Helper()
-	billing := gjson.GetBytes(body, "system.0.text").String()
-	require.Regexp(t, `cch=[0-9a-f]{5};`, billing)
-	placeholder, err := sjson.SetBytes(body, "system.0.text", setBillingCCHValue(billing, "00000"))
-	require.NoError(t, err)
-	digest := xxhash.NewWithSeed(cchSeed)
-	_, _ = digest.Write(placeholder)
-	require.Contains(t, billing, fmt.Sprintf("cch=%05x;", digest.Sum64()&0xFFFFF),
-		"CCH must cover the final transmitted body after capability and count_tokens filtering")
-}
-
-func TestClaudeFrozenUpstreamCompatibility_BetaFilteringBeforeCCH(t *testing.T) {
+func TestClaudeFrozenUpstreamCompatibility_BetaFilteringPreservesClientBilling(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, endpoint := range []string{"messages", "count_tokens"} {
 		for _, tc := range []struct {
@@ -112,7 +99,7 @@ func TestClaudeFrozenUpstreamCompatibility_BetaFilteringBeforeCCH(t *testing.T) 
 				require.Equal(t, "hello", messages[len(messages)-1].Get("content").String())
 				require.Equal(t, "high", gjson.GetBytes(wireBody, "output_config.effort").String())
 				require.Equal(t, "1h", gjson.GetBytes(wireBody, "system.1.cache_control.ttl").String())
-				requireClaudeWireCCH(t, actualBody)
+				require.Equal(t, gjson.GetBytes(body, "system.0.text").String(), gjson.GetBytes(actualBody, "system.0.text").String())
 				require.Equal(t, profile.UserAgent, getHeaderRaw(req.Header, "User-Agent"))
 				require.Equal(t, profile.StainlessOS, getHeaderRaw(req.Header, "X-Stainless-OS"))
 				metadata := ParseMetadataUserID(gjson.GetBytes(wireBody, "metadata.user_id").String())
@@ -179,7 +166,7 @@ func TestClaudeUpstreamCompatibility_AccountBetaOverrideControlsMessageOutputCon
 	}
 }
 
-func TestClaudeFrozenUpstreamCompatibility_CountTokensCacheLimitAndCCH(t *testing.T) {
+func TestClaudeFrozenUpstreamCompatibility_CountTokensCacheLimitPreservesClientBilling(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	resetGatewayForwardingSettingsCacheForTest(t)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -216,6 +203,6 @@ func TestClaudeFrozenUpstreamCompatibility_CountTokensCacheLimitAndCCH(t *testin
 	require.False(t, gjson.GetBytes(upstream.lastBody, "messages.0.output_config").Exists())
 	require.Len(t, gjson.GetBytes(upstream.lastBody, "messages").Array(), 3)
 	require.False(t, gjson.GetBytes(upstream.lastBody, "max_tokens").Exists())
-	requireClaudeWireCCH(t, upstream.lastBody)
-	require.Equal(t, upstream.lastBody, parsed.Body.Bytes(), "accepted request snapshot must retain the signed wire body")
+	require.Equal(t, gjson.GetBytes(body, "system.0.text").String(), gjson.GetBytes(upstream.lastBody, "system.0.text").String())
+	require.Equal(t, upstream.lastBody, parsed.Body.Bytes(), "accepted request snapshot must retain the actual wire body")
 }

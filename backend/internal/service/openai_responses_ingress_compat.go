@@ -13,6 +13,10 @@ import (
 // payloads that a few Responses clients still emit. Native Responses input is
 // always authoritative because this path has no separate full-replay attempt.
 func normalizeOpenAIResponsesLegacyIngress(body []byte) ([]byte, bool, error) {
+	return normalizeOpenAIResponsesLegacyIngressWithOptions(body, apicompat.RequestConversionOptions{})
+}
+
+func normalizeOpenAIResponsesLegacyIngressWithOptions(body []byte, opts apicompat.RequestConversionOptions) ([]byte, bool, error) {
 	if len(body) == 0 {
 		return body, false, nil
 	}
@@ -43,7 +47,7 @@ func normalizeOpenAIResponsesLegacyIngress(body []byte) ([]byte, bool, error) {
 	if hasMessages {
 		messages, messagesAreArray := messagesValue.([]any)
 		if messagesAreArray && len(messages) > 0 {
-			legacy, err := convertLegacyResponsesMessages(body)
+			legacy, err := convertLegacyResponsesMessagesWithOptions(body, opts)
 			if err != nil {
 				return body, false, err
 			}
@@ -105,13 +109,13 @@ type convertedLegacyResponsesMessages struct {
 	hasReasoningEffort bool
 }
 
-func convertLegacyResponsesMessages(body []byte) (convertedLegacyResponsesMessages, error) {
+func convertLegacyResponsesMessagesWithOptions(body []byte, opts apicompat.RequestConversionOptions) (convertedLegacyResponsesMessages, error) {
 	var converted convertedLegacyResponsesMessages
 	var chatRequest apicompat.ChatCompletionsRequest
 	if err := json.Unmarshal(body, &chatRequest); err != nil {
 		return converted, fmt.Errorf("normalize legacy Responses messages: %w", err)
 	}
-	responsesRequest, err := apicompat.ChatCompletionsToResponses(&chatRequest)
+	responsesRequest, err := apicompat.ChatCompletionsToResponsesWithOptions(&chatRequest, opts)
 	if err != nil {
 		return converted, fmt.Errorf("normalize legacy Responses messages: %w", err)
 	}
@@ -122,7 +126,10 @@ func convertLegacyResponsesMessages(body []byte) (convertedLegacyResponsesMessag
 		return converted, fmt.Errorf("decode normalized legacy Responses input: %w", err)
 	}
 
-	converted.instructions = strings.TrimSpace(responsesRequest.Instructions)
+	converted.instructions = responsesRequest.Instructions
+	if !opts.PreserveClientText {
+		converted.instructions = strings.TrimSpace(converted.instructions)
+	}
 	converted.maxOutputTokens = responsesRequest.MaxOutputTokens
 	converted.temperature = responsesRequest.Temperature
 	converted.topP = responsesRequest.TopP

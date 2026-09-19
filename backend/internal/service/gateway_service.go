@@ -36,27 +36,9 @@ const (
 	claudeAPICountTokensURL = "https://api.anthropic.com/v1/messages/count_tokens?beta=true"
 	stickySessionTTL        = time.Hour // 粘性会话TTL
 	defaultMaxLineSize      = 500 * 1024 * 1024
-	// Canonical Claude Code banner. Keep it EXACT (no trailing whitespace/newlines)
-	// to match real Claude CLI traffic as closely as possible. When we need a visual
-	// separator between system blocks, we add "\n\n" at concatenation time.
+	// Canonical banner used to recognize caller-provided Claude Code instructions.
 	claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
-	// claudeCodeSystemPromptExpansion 是真实 Claude Code 主系统提示词中"与具体工具无关"
-	// 的通用段落（身份/用途总述 + 安全声明 + URL 告警 + Tone and style），逐字取自真实
-	// CLI（2.1.x 一致）。伪装路径用它把 system 块数从 2 提升到 3、体量贴近真实 CC，同时
-	// 刻意排除 # Doing tasks / # Using your tools / # Executing actions 等会污染被代理
-	// 用户行为的工具专属指令。
-	claudeCodeSystemPromptExpansion = `You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
-
-IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.
-IMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.
-
-# Tone and style
- - Only use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.
- - Your responses should be short and concise.
- - When referencing specific functions or pieces of code include the pattern file_path:line_number to allow the user to easily navigate to the source code location.
- - When referencing GitHub issues or pull requests, use the owner/repo#123 format (e.g. anthropics/claude-code#100) so they render as clickable links.
- - Do not use a colon before tool calls. Your tool calls may not be shown directly in the output, so text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period.`
-	maxCacheControlBlocks = 4 // Anthropic API 允许的最大 cache_control 块数量
+	maxCacheControlBlocks  = 4 // Anthropic API 允许的最大 cache_control 块数量
 
 	defaultUserGroupRateCacheTTL           = 30 * time.Second
 	defaultModelsListCacheTTL              = 15 * time.Second
@@ -406,16 +388,6 @@ func isClaudeCodeCredentialScopeError(msg string) bool {
 var (
 	sseDataRe            = regexp.MustCompile(`^data:\s*`)
 	claudeCliUserAgentRe = regexp.MustCompile(`(?i)^claude-cli/\d+\.\d+\.\d+`)
-
-	// claudeCodePromptPrefixes 用于检测 Claude Code 系统提示词的前缀列表
-	// 支持多种变体：标准版、Agent SDK 版、Explore Agent 版、Compact 版等
-	// 注意：前缀之间不应存在包含关系，否则会导致冗余匹配
-	claudeCodePromptPrefixes = []string{
-		"You are Claude Code, Anthropic's official CLI for Claude",             // 标准版 & Agent SDK 版（含 running within...）
-		"You are a Claude agent, built on Anthropic's Claude Agent SDK",        // Agent SDK 变体
-		"You are a file search specialist for Claude Code",                     // Explore Agent 版
-		"You are a helpful AI assistant tasked with summarizing conversations", // Compact 版
-	}
 )
 
 // ErrNoAvailableAccounts 表示没有可用的账号

@@ -371,40 +371,19 @@ func TestNormalizeClaudeOAuthRequestBody_HaikuShortModelStillNormalizesToDatedID
 	require.Equal(t, "claude-haiku-4-5-20251001", gjson.GetBytes(out, "model").String())
 }
 
-func TestApplyClaudeCodeOAuthMimicryToBody_HaikuRewritesSystem(t *testing.T) {
-	account := &Account{ID: 405, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
-	body := []byte(`{"model":"claude-haiku-4-5","system":"Pi project instructions","messages":[{"role":"user","content":"hello"}]}`)
-	svc := &GatewayService{cfg: &config.Config{}}
-
-	out := svc.applyClaudeCodeOAuthMimicryToBody(
-		context.Background(), nil, account, body, "Pi project instructions", "claude-haiku-4-5",
-	)
-
-	system := gjson.GetBytes(out, "system").Array()
-	require.Len(t, system, 3)
-	require.Contains(t, system[0].Get("text").String(), "x-anthropic-billing-header:")
-	require.Equal(t, claudeCodeSystemPrompt, system[1].Get("text").String())
-	require.Contains(t, gjson.GetBytes(out, "messages.0.content.0.text").String(), "Pi project instructions")
-	require.Equal(t, "claude-haiku-4-5-20251001", gjson.GetBytes(out, "model").String())
-}
-
-func TestApplyClaudeCodeOAuthMimicryToBody_FableOmitsRefusedExpansion(t *testing.T) {
-	account := &Account{ID: 406, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
-	body := []byte(`{"model":"claude-fable-5","system":"Project instructions","messages":[{"role":"user","content":"hello"}]}`)
-	svc := &GatewayService{cfg: &config.Config{}}
-
-	out := svc.applyClaudeCodeOAuthMimicryToBody(
-		context.Background(), nil, account, body, "Project instructions", "claude-fable-5",
-	)
-
-	system := gjson.GetBytes(out, "system").Array()
-	require.Len(t, system, 2)
-	require.Contains(t, system[0].Get("text").String(), "x-anthropic-billing-header:")
-	require.Equal(t, claudeCodeSystemPrompt, system[1].Get("text").String())
-	require.NotContains(t, string(out), claudeCodeSystemPromptExpansion)
-	require.Contains(t, gjson.GetBytes(out, "messages.0.content.0.text").String(), "Project instructions")
-	require.Equal(t, "Understood. I will follow these instructions.", gjson.GetBytes(out, "messages.1.content.0.text").String())
-	require.Equal(t, "hello", gjson.GetBytes(out, "messages.2.content").String())
+func TestApplyClaudeCodeOAuthMimicryToBody_PreservesClientPrompts(t *testing.T) {
+	for _, model := range []string{"claude-haiku-4-5", "claude-fable-5"} {
+		t.Run(model, func(t *testing.T) {
+			account := &Account{ID: 405, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
+			body := []byte(`{"model":"` + model + `","system":"You are OpenCode, the best coding agent on the planet.","messages":[{"role":"user","content":"hello"}]}`)
+			svc := &GatewayService{cfg: &config.Config{}}
+			out := svc.applyClaudeCodeOAuthMimicryToBody(context.Background(), nil, account, body, model)
+			require.Equal(t, gjson.GetBytes(body, "system").String(), gjson.GetBytes(out, "system").String())
+			require.JSONEq(t, gjson.GetBytes(body, "messages").Raw, gjson.GetBytes(out, "messages").Raw)
+			require.NotContains(t, string(out), "x-anthropic-billing-header:")
+			require.Equal(t, claude.NormalizeModelID(model), gjson.GetBytes(out, "model").String())
+		})
+	}
 }
 
 // ============================================================================

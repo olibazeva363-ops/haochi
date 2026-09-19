@@ -1697,30 +1697,11 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.EnableMetadataPassthrough
 		}(),
-		EnableCCHSigning: func() bool {
-			if req.EnableCCHSigning != nil {
-				return *req.EnableCCHSigning
-			}
-			return previousSettings.EnableCCHSigning
-		}(),
-		EnableClaudeOAuthSystemPromptInjection: func() bool {
-			if req.EnableClaudeOAuthSystemPromptInjection != nil {
-				return *req.EnableClaudeOAuthSystemPromptInjection
-			}
-			return previousSettings.EnableClaudeOAuthSystemPromptInjection
-		}(),
-		ClaudeOAuthSystemPrompt: func() string {
-			if req.ClaudeOAuthSystemPrompt != nil {
-				return *req.ClaudeOAuthSystemPrompt
-			}
-			return previousSettings.ClaudeOAuthSystemPrompt
-		}(),
-		ClaudeOAuthSystemPromptBlocks: func() string {
-			if req.ClaudeOAuthSystemPromptBlocks != nil {
-				return *req.ClaudeOAuthSystemPromptBlocks
-			}
-			return previousSettings.ClaudeOAuthSystemPromptBlocks
-		}(),
+		// Keep legacy fields compatible while ignoring requests to restore prompt rewriting.
+		EnableCCHSigning:                       false,
+		EnableClaudeOAuthSystemPromptInjection: false,
+		ClaudeOAuthSystemPrompt:                "",
+		ClaudeOAuthSystemPromptBlocks:          "",
 		EnableAnthropicCacheTTL1hInjection: func() bool {
 			if req.EnableAnthropicCacheTTL1hInjection != nil {
 				return *req.EnableAnthropicCacheTTL1hInjection
@@ -1739,12 +1720,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.RewriteMessageCacheControl
 		}(),
-		EnableClientDatelineNormalization: func() bool {
-			if req.EnableClientDatelineNormalization != nil {
-				return *req.EnableClientDatelineNormalization
-			}
-			return previousSettings.EnableClientDatelineNormalization
-		}(),
+		EnableClientDatelineNormalization: false,
 		AntigravityUserAgentVersion: func() string {
 			if req.AntigravityUserAgentVersion != nil {
 				return *req.AntigravityUserAgentVersion

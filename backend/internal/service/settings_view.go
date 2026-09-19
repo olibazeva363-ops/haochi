@@ -231,13 +231,13 @@ type SystemSettings struct {
 	OpenAITTFTMode                         string // Responses first_token_ms 统计口径（默认 semantic）
 	EnableFingerprintUnification           bool   // 是否统一 OAuth 账号的指纹头（默认 true）
 	EnableMetadataPassthrough              bool   // 是否透传客户端原始 metadata（默认 false）
-	EnableCCHSigning                       bool   // 是否为网关生成的 Claude OAuth mimic 请求注入并签名 CCH（默认 false）
-	EnableClaudeOAuthSystemPromptInjection bool   // 是否对 Claude OAuth mimic 路径注入 Claude Code system blocks（默认 true）
-	ClaudeOAuthSystemPrompt                string // Claude OAuth mimic 路径注入的通用扩展 system prompt；空值使用内置默认
-	ClaudeOAuthSystemPromptBlocks          string // Claude OAuth mimic 路径注入的 system blocks JSON 配置；空值使用内置默认
+	EnableCCHSigning                       bool   // Deprecated: compatibility field, always false.
+	EnableClaudeOAuthSystemPromptInjection bool   // Deprecated: compatibility field, always false.
+	ClaudeOAuthSystemPrompt                string // Deprecated: compatibility field, always empty.
+	ClaudeOAuthSystemPromptBlocks          string // Deprecated: compatibility field, always empty.
 	EnableAnthropicCacheTTL1hInjection     bool   // 是否对 Anthropic OAuth/SetupToken 请求体注入 1h cache_control ttl（默认 true）
 	AnthropicDefaultBaseRPM                int    // 未配置账号级 base_rpm 的 Anthropic OAuth/SetupToken 账号使用的默认 RPM；0=不启用（默认 15）
-	EnableClientDatelineNormalization      bool   // 是否对 Anthropic OAuth/SetupToken 请求体做客户端 dateline 归一化（默认 true）
+	EnableClientDatelineNormalization      bool   // Deprecated: compatibility field, always false.
 	RewriteMessageCacheControl             bool   // 是否改写 messages[*].content[*].cache_control（默认 false）
 	AntigravityUserAgentVersion            string // Antigravity 上游 User-Agent 版本号；空值使用配置/默认值
 	OpenAICodexUserAgent                   string // OpenAI Codex 上游完整 User-Agent；空值由 Codex 客户端版本号拼出标准 TUI UA

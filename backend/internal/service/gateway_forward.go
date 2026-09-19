@@ -221,25 +221,14 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		})
 	}
 
-	// Claude Code 客户端判定：UA 匹配 claude-cli/* 且携带 metadata.user_id。
-	// 真正的 Claude Code 客户端自带完整的 system prompt、cache_control 断点和 header，
-	// 不需要代理做任何 body 级别的 mimicry；强行替换反而会破坏客户端的缓存策略
-	// （长 system prompt 被替换为 ~45 tokens 的短 prompt，低于 Anthropic 1024 token
-	// 最低缓存门槛，导致系统级缓存失效）。
-	//
-	// 对于非 Claude Code 的第三方客户端（opencode 等），仍然走完整 mimicry。
+	// Recognize Claude Code clients to preserve their transport and cache settings.
 	var clientUserAgent string
 	if c != nil {
 		clientUserAgent = c.GetHeader("User-Agent")
 	}
 	isClaudeCode := IsClaudeCodeClient(ctx) || isClaudeCodeClient(clientUserAgent, parsed.MetadataUserID)
 
-	// 补充判定：上游 API 网关（如 new-api）转发真实 Claude Code 流量时，
-	// UA 会变成 Go-http-client 但 body 保留了完整的 Claude Code 特征
-	// （billing attribution block + metadata.user_id）。此时如果仍走 mimicry
-	// 重写 system prompt，会破坏 Anthropic prompt cache 的前缀匹配——
-	// 导致 messages 级缓存永远 miss、cache_creation 每轮全量重写。
-	// 通过检查 body 中的 billing attribution block 来识别被代理的真实 CC 流量。
+	// Relays may replace the User-Agent while preserving Claude Code body metadata.
 	if !isClaudeCode && parsed.MetadataUserID != "" {
 		isClaudeCode = systemHasBillingAttributionBlock(body)
 	}
@@ -247,19 +236,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCode
 
 	if shouldMimicClaudeCode {
-		// 与 Parrot 对齐：OAuth 账号无条件重写 system（即使客户端已发了 Claude Code
-		// 风格的 system prompt）。原因：第三方工具（opencode 等）会发 "You are Claude
-		// Code..." system prompt 但缺少 billing attribution block，导致 Anthropic
-		// 检测到"有 CC prompt 但无 billing block"的不一致而判为 third-party。
-		// Parrot 的 transform_request 从不检查客户端 system 内容，直接覆盖。
-		systemRaw, _ := parsed.SystemValue()
-		systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
-		if systemPromptInjectionEnabled {
-			if err := replaceBody(rewriteSystemForNonClaudeCodeWithPromptBlocks(body, systemRaw, systemPrompt, systemPromptBlocks)); err != nil {
-				return nil, err
-			}
-		}
-
+		// OAuth transport adaptation must preserve caller-authored prompts.
 		normalizeOpts := claudeOAuthNormalizeOptions{}
 		if s.identityService != nil && c != nil {
 			fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, c.Request.Header)
@@ -298,16 +275,6 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			if err := replaceBody(applyToolsLastCacheBreakpoint(body)); err != nil {
 				return nil, err
 			}
-		}
-	}
-
-	// 客户端 dateline 归一化：仅对 Anthropic OAuth/SetupToken 账号生效。
-	// 抹除 "Today's date is …" 语句里可能被注入的隐写指纹（4 种撇号 × 2 种日期
-	// 分隔符），还原为 ASCII 撇号 + "-" 分隔符。运行在 mimicry 分支之外，
-	// 保证真实 Claude Code 客户端注入的指纹同样被清洗。
-	if next, ok := s.normalizeClientDatelineIfEnabled(ctx, account, body); ok {
-		if err := replaceBody(next); err != nil {
-			return nil, err
 		}
 	}
 
@@ -386,25 +353,29 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	if err := replaceBody(StripEmptyTextBlocks(body)); err != nil {
 		return nil, err
 	}
-	// Pre-filter: strip web-search history blocks the upstream cannot accept
-	// (emulation-synthesized server_tool_use / web_search_tool_result always;
-	// genuine ones additionally for passback-required upstreams). See
-	// FilterWebSearchHistoryBlocks. reqModel 此时已是映射后的模型 ID。
-	if err := replaceBody(FilterWebSearchHistoryBlocks(body, reqModel)); err != nil {
-		return nil, err
-	}
-	// Pre-filter: remove thinking blocks with missing/invalid signatures before forwarding.
-	// Clients (e.g. Claude Code) sometimes send multi-turn conversations where a historical
-	// assistant message contains a thinking block that is missing the required "signature" field,
-	// causing upstream to reject the request with 400 "thinking.signature: Field required".
-	// FilterThinkingBlocks removes only the invalid blocks; thinking blocks with valid signatures
-	// are preserved. This avoids relying solely on the post-error retry path, which can time out
-	// (maxRetryElapsed = 10s) for long conversations before the retry budget is exhausted.
-	//
-	// 仅 anthropic-strict 模型族执行此过滤；passback-required 上游 (DeepSeek/Kimi/GLM 等)
-	// 要求历史 thinking block 原样回传，过滤反而制造 400。reqModel 此时已是映射后的模型 ID。
-	if err := replaceBody(FilterThinkingBlocks(body, reqModel)); err != nil {
-		return nil, err
+	// OAuth/SetupToken preserves caller content, including unsupported history.
+	// Let the upstream validate it without adding placeholders or reclassifying it.
+	if !account.IsAnthropicOAuthOrSetupToken() {
+		// Pre-filter: strip web-search history blocks the upstream cannot accept
+		// (emulation-synthesized server_tool_use / web_search_tool_result always;
+		// genuine ones additionally for passback-required upstreams). See
+		// FilterWebSearchHistoryBlocks. reqModel 此时已是映射后的模型 ID。
+		if err := replaceBody(FilterWebSearchHistoryBlocks(body, reqModel)); err != nil {
+			return nil, err
+		}
+		// Pre-filter: remove thinking blocks with missing/invalid signatures before forwarding.
+		// Clients (e.g. Claude Code) sometimes send multi-turn conversations where a historical
+		// assistant message contains a thinking block that is missing the required "signature" field,
+		// causing upstream to reject the request with 400 "thinking.signature: Field required".
+		// FilterThinkingBlocks removes only the invalid blocks; thinking blocks with valid signatures
+		// are preserved. This avoids relying solely on the post-error retry path, which can time out
+		// (maxRetryElapsed = 10s) for long conversations before the retry budget is exhausted.
+		//
+		// 仅 anthropic-strict 模型族执行此过滤；passback-required 上游 (DeepSeek/Kimi/GLM 等)
+		// 要求历史 thinking block 原样回传，过滤反而制造 400。reqModel 此时已是映射后的模型 ID。
+		if err := replaceBody(FilterThinkingBlocks(body, reqModel)); err != nil {
+			return nil, err
+		}
 	}
 	// Chinese LLM thinking.type 协议差异补正（如 MiniMax 只接受 adaptive；Anthropic-SDK
 	// 客户端默认发 enabled）。仅对 passback-required 上游生效（claude-* 不会进来）。
@@ -430,7 +401,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		if err != nil {
 			return nil, err
 		}
-		// 记录本次实际发送的 wire body；只有请求成功后才写回 ParsedRequest，避免 400 retry 基于已签名 CCH 再改写。
+		// 记录本次实际发送的 wire body；只有请求成功后才写回 ParsedRequest。
 		lastWireBody = wireBody
 
 		// 发送请求
@@ -490,7 +461,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			if readErr == nil {
 				_ = resp.Body.Close()
 
-				if s.shouldRectifySignatureError(ctx, account, respBody, reqModel) {
+				if !account.IsAnthropicOAuthOrSetupToken() && s.shouldRectifySignatureError(ctx, account, respBody, reqModel) {
 					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 						ProxyID:            opsUpstreamProxyID(account),
 						ProxyName:          opsUpstreamProxyName(account),

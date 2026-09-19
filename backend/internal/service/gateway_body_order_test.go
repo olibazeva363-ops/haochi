@@ -122,22 +122,10 @@ func TestNormalizeClaudeOAuthRequestBody_PreservesTopLevelFieldOrder(t *testing.
 	assertJSONTokenOrder(t, resultStr, `"alpha"`, `"model"`, `"temperature"`, `"system"`, `"messages"`, `"omega"`, `"tools"`, `"metadata"`, `"max_tokens"`)
 	require.Contains(t, resultStr, `"temperature":0.2`)
 	require.NotContains(t, resultStr, `"tool_choice"`)
-	require.Contains(t, resultStr, `"system":"`+claudeCodeSystemPrompt+`"`)
+	require.Contains(t, resultStr, `"system":"You are OpenCode, the best coding agent on the planet."`)
 	require.Contains(t, resultStr, `"tools":[]`)
 	require.Contains(t, resultStr, `"metadata":{"user_id":"user-1"}`)
 	require.Contains(t, resultStr, `"max_tokens":128000`)
-}
-
-func TestInjectClaudeCodePrompt_PreservesFieldOrder(t *testing.T) {
-	body := []byte(`{"alpha":1,"system":[{"id":"block-1","type":"text","text":"Custom"}],"messages":[],"omega":2}`)
-
-	result := injectClaudeCodePrompt(body, []any{
-		map[string]any{"id": "block-1", "type": "text", "text": "Custom"},
-	})
-	resultStr := string(result)
-
-	assertJSONTokenOrder(t, resultStr, `"alpha"`, `"system"`, `"messages"`, `"omega"`)
-	require.Contains(t, resultStr, `{"id":"block-1","type":"text","text":"`+claudeCodeSystemPrompt+`\n\nCustom"}`)
 }
 
 func TestEnforceCacheControlLimit_PreservesTopLevelFieldOrder(t *testing.T) {

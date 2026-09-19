@@ -16,7 +16,13 @@ type chatMessageContent struct {
 // true. store is always false and reasoning.encrypted_content is always
 // included so that the response translator has full context.
 func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest, error) {
-	input, err := convertChatMessagesToResponsesInput(req.Messages)
+	return ChatCompletionsToResponsesWithOptions(req, RequestConversionOptions{})
+}
+
+// ChatCompletionsToResponsesWithOptions retains protocol conversion while allowing
+// callers to disable generated reasoning tags and empty tool-result placeholders.
+func ChatCompletionsToResponsesWithOptions(req *ChatCompletionsRequest, opts RequestConversionOptions) (*ResponsesRequest, error) {
+	input, err := convertChatMessagesToResponsesInputWithOptions(req.Messages, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -99,10 +105,10 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 
 // convertChatMessagesToResponsesInput converts the Chat Completions messages
 // array into a Responses API input items array.
-func convertChatMessagesToResponsesInput(msgs []ChatMessage) ([]ResponsesInputItem, error) {
+func convertChatMessagesToResponsesInputWithOptions(msgs []ChatMessage, opts RequestConversionOptions) ([]ResponsesInputItem, error) {
 	var out []ResponsesInputItem
 	for _, m := range msgs {
-		items, err := chatMessageToResponsesItems(m)
+		items, err := chatMessageToResponsesItemsWithOptions(m, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -113,18 +119,18 @@ func convertChatMessagesToResponsesInput(msgs []ChatMessage) ([]ResponsesInputIt
 
 // chatMessageToResponsesItems converts a single ChatMessage into one or more
 // ResponsesInputItem values.
-func chatMessageToResponsesItems(m ChatMessage) ([]ResponsesInputItem, error) {
+func chatMessageToResponsesItemsWithOptions(m ChatMessage, opts RequestConversionOptions) ([]ResponsesInputItem, error) {
 	switch m.Role {
 	case "system":
 		return chatSystemToResponses(m)
 	case "user":
 		return chatUserToResponses(m)
 	case "assistant":
-		return chatAssistantToResponses(m)
+		return chatAssistantToResponsesWithOptions(m, opts)
 	case "tool":
-		return chatToolToResponses(m)
+		return chatToolToResponsesWithOptions(m, opts)
 	case "function":
-		return chatFunctionToResponses(m)
+		return chatFunctionToResponsesWithOptions(m, opts)
 	default:
 		return chatUserToResponses(m)
 	}
@@ -161,17 +167,20 @@ func chatUserToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 // text content and tool_calls, the text is emitted as an assistant message
 // first, then each tool_call becomes a function_call item. If the content is
 // empty/nil and there are tool_calls, only function_call items are emitted.
-func chatAssistantToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+func chatAssistantToResponsesWithOptions(m ChatMessage, opts RequestConversionOptions) ([]ResponsesInputItem, error) {
 	var items []ResponsesInputItem
 	content := ""
 
 	if m.ReasoningContent != "" {
-		content = "<thinking>" + m.ReasoningContent + "</thinking>"
+		content = m.ReasoningContent
+		if !opts.PreserveClientText {
+			content = "<thinking>" + content + "</thinking>"
+		}
 	}
 
 	// Emit assistant message with output_text if content is non-empty.
 	if len(m.Content) > 0 {
-		s, err := parseAssistantContent(m.Content)
+		s, err := parseAssistantContentWithOptions(m.Content, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -217,7 +226,7 @@ func chatAssistantToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 //
 // For structured thinking/reasoning parts, it preserves semantics by wrapping
 // the text in explicit tags so downstream can still distinguish it from normal text.
-func parseAssistantContent(raw json.RawMessage) (string, error) {
+func parseAssistantContentWithOptions(raw json.RawMessage, opts RequestConversionOptions) (string, error) {
 	if len(raw) == 0 {
 		return "", nil
 	}
@@ -246,6 +255,15 @@ func parseAssistantContent(raw json.RawMessage) (string, error) {
 
 		switch typ {
 		case "thinking", "reasoning":
+			if opts.PreserveClientText {
+				if thinking != "" {
+					text = thinking
+				}
+				if err := write(text); err != nil {
+					return "", err
+				}
+				continue
+			}
 			if thinking != "" {
 				if err := write("<thinking>"); err != nil {
 					return "", err
@@ -281,12 +299,12 @@ func parseAssistantContent(raw json.RawMessage) (string, error) {
 
 // chatToolToResponses converts a tool result message (role=tool) into a
 // function_call_output item.
-func chatToolToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+func chatToolToResponsesWithOptions(m ChatMessage, opts RequestConversionOptions) ([]ResponsesInputItem, error) {
 	output, err := parseChatContent(m.Content)
 	if err != nil {
 		return nil, err
 	}
-	if output == "" {
+	if output == "" && !opts.PreserveClientText {
 		output = "(empty)"
 	}
 	return []ResponsesInputItem{{
@@ -299,12 +317,12 @@ func chatToolToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 // chatFunctionToResponses converts a legacy function result message
 // (role=function) into a function_call_output item. The Name field is used as
 // call_id since legacy function calls do not carry a separate call_id.
-func chatFunctionToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+func chatFunctionToResponsesWithOptions(m ChatMessage, opts RequestConversionOptions) ([]ResponsesInputItem, error) {
 	output, err := parseChatContent(m.Content)
 	if err != nil {
 		return nil, err
 	}
-	if output == "" {
+	if output == "" && !opts.PreserveClientText {
 		output = "(empty)"
 	}
 	return []ResponsesInputItem{{

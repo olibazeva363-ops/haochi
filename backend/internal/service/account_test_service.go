@@ -465,10 +465,13 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	// Create Claude Code style payload (same for all account types)
+	// Keep OAuth connection probes consistent with prompt-preserving forwarding.
 	payload, err := createTestPayload(testModelID)
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create test payload")
+	}
+	if account.IsAnthropicOAuthOrSetupToken() {
+		delete(payload, "system")
 	}
 	payloadBytes, _ := json.Marshal(payload)
 

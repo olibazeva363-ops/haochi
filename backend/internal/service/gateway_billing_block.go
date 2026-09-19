@@ -1,49 +1,6 @@
 package service
 
-import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-	"unicode/utf16"
-
-	"github.com/tidwall/gjson"
-)
-
-// fingerprintSalt 是计算 cc_version 后缀指纹的盐值。
-//
-// 来源：与 Parrot src/transform/cc_mimicry.py 的 FINGERPRINT_SALT 完全一致；
-// 这是真实 Claude Code CLI 抓包推导出的常量，改动会导致 fp 与 CLI 不一致，
-// 进一步触发 Anthropic 的第三方检测。
-const fingerprintSalt = "59cf53e54c78"
-
-// computeClaudeCodeFingerprint 复刻真实 Claude Code CLI 的 cc_version 指纹算法：
-//
-//  1. 取 messages 中第一条 role=user 的纯文本（首块 text）
-//  2. 取该文本的第 4、7、20 字符（不足以 '0' 补齐）
-//  3. SHA256(SALT + chars + cc_version) 取 hex 前 3 字符
-//
-// 算法来自 Parrot src/transform/cc_mimicry.py:compute_fingerprint，与官方 CLI 字节对齐。
-// 任何偏差都会导致 cc_version=X.Y.Z.{fp} 在上游侧与真实 CLI 不一致。
-func computeClaudeCodeFingerprint(body []byte, version string) string {
-	firstText := extractFirstUserText(body)
-	indices := []int{4, 7, 20}
-	// Claude Code computes this value in JavaScript, where string indexing uses
-	// UTF-16 code units rather than UTF-8 bytes or Unicode code points. Keep the
-	// selected units together before decoding so a selected high/low surrogate
-	// pair has the same join semantics as JavaScript.
-	textUnits := utf16.Encode([]rune(firstText))
-	selectedUnits := make([]uint16, 0, len(indices))
-	for _, i := range indices {
-		if i < len(textUnits) {
-			selectedUnits = append(selectedUnits, textUnits[i])
-		} else {
-			selectedUnits = append(selectedUnits, uint16('0'))
-		}
-	}
-	chars := string(utf16.Decode(selectedUnits))
-	sum := sha256.Sum256([]byte(fingerprintSalt + chars + version))
-	return hex.EncodeToString(sum[:])[:3]
-}
+import "github.com/tidwall/gjson"
 
 // extractFirstUserText 提取 messages 中第一条 user 消息的首段 text 内容。
 // 兼容 string 和 []block 两种 content 格式。
@@ -75,26 +32,4 @@ func extractFirstUserText(body []byte) string {
 		return false
 	})
 	return first
-}
-
-// buildBillingAttributionText 构造 system 数组的 billing attribution 文本。
-//
-// 形态对齐真实 Claude Code CLI：
-//
-//	x-anthropic-billing-header: cc_version=2.1.161.{fp}; cc_entrypoint=cli;
-//
-// 默认不带 cch。兼容开关启用时，signBillingHeaderCCH 会在所有请求体改写完成后
-// 注入并签名该字段，避免签名与最终 wire body 不一致。
-//
-// 此 block 不带 cache_control（与真实 CLI 一致；cache breakpoint 由后续的
-// Claude Code prompt block 承担）。
-func buildBillingAttributionText(body []byte, cliVersion string) (string, error) {
-	if cliVersion == "" {
-		return "", fmt.Errorf("cliVersion required")
-	}
-	fp := computeClaudeCodeFingerprint(body, cliVersion)
-	return fmt.Sprintf(
-		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=cli;",
-		cliVersion, fp,
-	), nil
 }

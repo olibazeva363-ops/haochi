@@ -236,7 +236,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyEnableAnthropicCacheTTL1hInjection:                 "true",
 		SettingKeyAnthropicDefaultBaseRPM:                            "15",
 		SettingKeyRewriteMessageCacheControl:                         strconv.FormatBool(s.defaultRewriteMessageCacheControl()),
-		SettingKeyEnableClientDatelineNormalization:                  "true",
+		SettingKeyEnableClientDatelineNormalization:                  "false",
 		SettingKeyAntigravityUserAgentVersion:                        "",
 		SettingKeyOpenAICodexUserAgent:                               "",
 		SettingKeyOpenAICodexClientVersion:                           "",
@@ -845,8 +845,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	// 分组隔离
 	result.AllowUngroupedKeyScheduling = settings[SettingKeyAllowUngroupedKeyScheduling] == "true"
 
-	// Gateway forwarding behavior (defaults: fingerprint=true, metadata_passthrough=false,
-	// cch_signing=false, claude_oauth_system_prompt_injection=true)
+	// Gateway forwarding behavior (defaults: fingerprint=true, metadata_passthrough=false).
 	result.OpenAITTFTMode = normalizeOpenAITTFTMode(settings[SettingKeyOpenAITTFTMode])
 	if v, ok := settings[SettingKeyEnableFingerprintUnification]; ok && v != "" {
 		result.EnableFingerprintUnification = v == "true"
@@ -854,14 +853,11 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 		result.EnableFingerprintUnification = true // default: enabled (current behavior)
 	}
 	result.EnableMetadataPassthrough = settings[SettingKeyEnableMetadataPassthrough] == "true"
-	result.EnableCCHSigning = settings[SettingKeyEnableCCHSigning] == "true"
-	if v, ok := settings[SettingKeyEnableClaudeOAuthSystemPromptInjection]; ok && v != "" {
-		result.EnableClaudeOAuthSystemPromptInjection = v == "true"
-	} else {
-		result.EnableClaudeOAuthSystemPromptInjection = true
-	}
-	result.ClaudeOAuthSystemPrompt = settings[SettingKeyClaudeOAuthSystemPrompt]
-	result.ClaudeOAuthSystemPromptBlocks = settings[SettingKeyClaudeOAuthSystemPromptBlocks]
+	// Retired fields remain in the API shape, but stored legacy values cannot enable prompt rewriting.
+	result.EnableCCHSigning = false
+	result.EnableClaudeOAuthSystemPromptInjection = false
+	result.ClaudeOAuthSystemPrompt = ""
+	result.ClaudeOAuthSystemPromptBlocks = ""
 	result.EnableAnthropicCacheTTL1hInjection = true
 	if v, ok := settings[SettingKeyEnableAnthropicCacheTTL1hInjection]; ok && v != "" {
 		result.EnableAnthropicCacheTTL1hInjection = v == "true"
@@ -877,11 +873,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	} else {
 		result.RewriteMessageCacheControl = s.defaultRewriteMessageCacheControl()
 	}
-	if v, ok := settings[SettingKeyEnableClientDatelineNormalization]; ok && v != "" {
-		result.EnableClientDatelineNormalization = v == "true"
-	} else {
-		result.EnableClientDatelineNormalization = true
-	}
+	result.EnableClientDatelineNormalization = false
 	result.AntigravityUserAgentVersion = antigravity.NormalizeUserAgentVersion(settings[SettingKeyAntigravityUserAgentVersion])
 	result.OpenAICodexUserAgent = strings.TrimSpace(settings[SettingKeyOpenAICodexUserAgent])
 	result.OpenAICodexClientVersion = NormalizeCodexClientVersion(settings[SettingKeyOpenAICodexClientVersion])
