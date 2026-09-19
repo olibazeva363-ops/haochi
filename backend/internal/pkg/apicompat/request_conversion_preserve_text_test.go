@@ -168,8 +168,11 @@ func TestAdaptResponsesClientTools_PreserveHistoryAndDiscoveredDescriptions(t *t
 			]}
 		]
 	}`), &req))
-	originalInput := req["input"].([]any)
-	discoveries, err := json.Marshal(originalInput[3].(map[string]any)["tools"])
+	originalInput, ok := req["input"].([]any)
+	require.True(t, ok)
+	searchOutput, ok := originalInput[3].(map[string]any)
+	require.True(t, ok)
+	discoveries, err := json.Marshal(searchOutput["tools"])
 	require.NoError(t, err)
 	_, changed, err := AdaptResponsesClientToolsWithOptions(req, RequestConversionOptions{PreserveClientText: true})
 	require.NoError(t, err)
