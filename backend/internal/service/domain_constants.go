@@ -628,14 +628,13 @@ const (
 	SettingKeyEnableFingerprintUnification = "enable_fingerprint_unification"
 	// SettingKeyEnableMetadataPassthrough 是否透传客户端原始 metadata.user_id（默认 false）
 	SettingKeyEnableMetadataPassthrough = "enable_metadata_passthrough"
-	// SettingKeyEnableCCHSigning enables the legacy body-bound CCH compatibility
-	// mode for gateway-generated Claude OAuth mimicry requests.
+	// SettingKeyEnableCCHSigning is retired; retained for API compatibility and always false.
 	SettingKeyEnableCCHSigning = "enable_cch_signing"
-	// SettingKeyEnableClaudeOAuthSystemPromptInjection 是否对 Claude OAuth mimic 路径注入 Claude Code system blocks（默认 true）
+	// SettingKeyEnableClaudeOAuthSystemPromptInjection is retired and always false.
 	SettingKeyEnableClaudeOAuthSystemPromptInjection = "enable_claude_oauth_system_prompt_injection"
-	// SettingKeyClaudeOAuthSystemPrompt Claude OAuth mimic 路径注入的通用扩展 system prompt（空值使用内置默认）
+	// SettingKeyClaudeOAuthSystemPrompt is retired and always empty.
 	SettingKeyClaudeOAuthSystemPrompt = "claude_oauth_system_prompt"
-	// SettingKeyClaudeOAuthSystemPromptBlocks Claude OAuth mimic 路径注入的 system blocks JSON 配置（空值使用内置默认）
+	// SettingKeyClaudeOAuthSystemPromptBlocks is retired and always empty.
 	SettingKeyClaudeOAuthSystemPromptBlocks = "claude_oauth_system_prompt_blocks"
 	// SettingKeyEnableAnthropicCacheTTL1hInjection 是否对 Anthropic OAuth/SetupToken 请求体注入 1h cache_control ttl（默认 true：
 	// 真实 Claude Code CLI 使用 1h TTL，且 mimic beta 集合已声明 extended-cache-ttl，默认 5m 会造成 header/body 不一致）
@@ -644,12 +643,7 @@ const (
 	// 账号使用的默认 RPM 上限（默认 15；0 表示不启用默认限制）。防封角度：无节奏
 	// 约束的裸池会以匀速机器节奏打满上游，RPM 三区限制是最低限度的行为整形。
 	SettingKeyAnthropicDefaultBaseRPM = "anthropic_default_base_rpm"
-	// SettingKeyEnableClientDatelineNormalization 是否对 Anthropic OAuth/SetupToken 账号
-	// 的 /v1/messages 请求体做客户端 dateline 归一化（默认 true）。
-	// 归一化把 system prompt / <system-reminder> 块中 "Today's date is …" 语句里的
-	// 非 ASCII 撇号与 "/" 日期分隔符还原为 ASCII 撇号 + "-" 分隔符，抹除某些客户端
-	// 在检测到非官方 base URL 时注入的 3 bit 隐写指纹。仅适用于 Anthropic OAuth/SetupToken
-	// 账号；API Key 账号不受影响。
+	// SettingKeyEnableClientDatelineNormalization is retired and always false.
 	SettingKeyEnableClientDatelineNormalization = "enable_client_dateline_normalization"
 	// SettingKeyRewriteMessageCacheControl 是否改写 messages[*].content[*].cache_control（默认 false）
 	SettingKeyRewriteMessageCacheControl = "rewrite_message_cache_control"

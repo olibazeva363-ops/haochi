@@ -38,7 +38,7 @@ type oauthPromptUpstreamRecorder struct {
 }
 
 func (u *oauthPromptUpstreamRecorder) DoWithTLS(req *http.Request, proxyURL string, accountID int64, concurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
-	resp, err := u.anthropicHTTPUpstreamRecorder.Do(req, proxyURL, accountID, concurrency)
+	resp, err := u.Do(req, proxyURL, accountID, concurrency)
 	u.bodies = append(u.bodies, append([]byte(nil), u.lastBody...))
 	return resp, err
 }
@@ -49,9 +49,10 @@ func newOAuthPromptTestService(t *testing.T, settingsMode, endpoint string, stat
 	cfg := &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}
 	payload := `{"id":"msg_preserved","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":12,"output_tokens":1}}`
 	contentType := "application/json"
-	if endpoint == "count_tokens" {
+	switch endpoint {
+	case "count_tokens":
 		payload = `{"input_tokens":12}`
-	} else if endpoint == "chat_completions" || endpoint == "responses" {
+	case "chat_completions", "responses":
 		contentType = "text/event-stream"
 		payload = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_preserved\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":12}}}\n\n" +
 			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"ok\"}}\n\n" +
