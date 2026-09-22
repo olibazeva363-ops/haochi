@@ -915,11 +915,7 @@ func TestGatewayService_AnthropicOAuthMimic_PreservesClientSystemAndMessages(t *
 			require.Equal(t, tt.wantModel, gjson.GetBytes(upstream.lastBody, "model").String())
 			originalSystem := gjson.Get(tt.body, "system")
 			system := gjson.GetBytes(upstream.lastBody, "system")
-			if originalSystem.IsArray() {
-				require.JSONEq(t, originalSystem.Raw, system.Raw)
-			} else {
-				require.Equal(t, originalSystem.String(), system.String())
-			}
+			requireMinimalIdentityPreservesClientSystem(t, originalSystem, system)
 			require.JSONEq(t, gjson.Get(tt.body, "messages").Raw, gjson.GetBytes(upstream.lastBody, "messages").Raw)
 			require.NotContains(t, string(upstream.lastBody), "[System Instructions]")
 			require.NotContains(t, string(upstream.lastBody), "Understood. I will follow these instructions.")
@@ -984,7 +980,7 @@ func TestGatewayService_AnthropicOAuthRealClaudeCodeHaiku_PreservesClientHeaders
 	require.Equal(t, "real-client-package", getHeaderRaw(upstream.lastReq.Header, "X-Stainless-Package-Version"))
 	require.Equal(t, clientBeta, getHeaderRaw(upstream.lastReq.Header, "anthropic-beta"))
 	require.Empty(t, getHeaderRaw(upstream.lastReq.Header, "x-client-request-id"), "真实 CC 不应被强制写入 mimic request id")
-	require.Equal(t, gjson.GetBytes(body, "system").Raw, gjson.GetBytes(upstream.lastBody, "system").Raw)
+	requireMinimalIdentityPreservesClientSystem(t, gjson.GetBytes(body, "system"), gjson.GetBytes(upstream.lastBody, "system"))
 	require.Equal(t, gjson.GetBytes(body, "messages").Raw, gjson.GetBytes(upstream.lastBody, "messages").Raw)
 	require.Equal(t, metadataUserID, gjson.GetBytes(upstream.lastBody, "metadata.user_id").String())
 	require.True(t, gjson.GetBytes(upstream.lastBody, "context_management").Exists())
@@ -1050,7 +1046,7 @@ func TestGatewayService_AnthropicOAuth_IgnoresRetiredSystemPromptSetting(t *test
 
 	system := gjson.GetBytes(upstream.lastBody, "system")
 	require.True(t, system.Exists())
-	require.Equal(t, "Original system prompt", system.String())
+	requireMinimalIdentityPreservesClientSystem(t, gjson.GetBytes(body, "system"), system)
 	require.NotContains(t, string(upstream.lastBody), "x-anthropic-billing-header:")
 	require.NotContains(t, string(upstream.lastBody), "[System Instructions]")
 }

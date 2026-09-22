@@ -166,7 +166,8 @@ func TestClaudeFrozenVersionFloorPreservesClientBillingVersion(t *testing.T) {
 	require.Equal(t, wireBody, actualBody)
 	require.Equal(t, "claude-cli/"+claude.CLICurrentVersion+" (external, cli)", getHeaderRaw(req.Header, "User-Agent"))
 	require.Equal(t, "0.94.0", getHeaderRaw(req.Header, "X-Stainless-Package-Version"))
-	billingText := gjson.GetBytes(actualBody, "system.0.text").String()
+	require.Equal(t, claudeCodeSystemPrompt, gjson.GetBytes(actualBody, "system.0.text").String())
+	billingText := gjson.GetBytes(actualBody, "system.1.text").String()
 	require.Equal(t, gjson.GetBytes(body, "system.0.text").String(), billingText)
 	require.Len(t, repo.updates, 1)
 }

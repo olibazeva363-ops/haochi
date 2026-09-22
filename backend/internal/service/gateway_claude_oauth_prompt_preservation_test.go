@@ -121,7 +121,7 @@ func TestAnthropicOAuthNativeRequestsPreserveClientPrompts(t *testing.T) {
 					}
 					require.NoError(t, err)
 					require.Len(t, upstream.bodies, 1)
-					require.JSONEq(t, gjson.GetBytes(body, "system").Raw, gjson.GetBytes(upstream.lastBody, "system").Raw)
+					requireMinimalIdentityPreservesClientSystem(t, gjson.GetBytes(body, "system"), gjson.GetBytes(upstream.lastBody, "system"))
 					require.JSONEq(t, gjson.GetBytes(body, "messages").Raw, gjson.GetBytes(upstream.lastBody, "messages").Raw)
 					require.Equal(t, "Client-owned tool description.", gjson.GetBytes(upstream.lastBody, "tools.0.description").String())
 					require.Equal(t, "Bearer test-oauth-token", getHeaderRaw(upstream.lastReq.Header, "authorization"))
@@ -158,12 +158,10 @@ func TestAnthropicOAuthOpenAICompatibilityPreservesClientPrompts(t *testing.T) {
 					require.NoError(t, err)
 					require.Len(t, upstream.bodies, 1)
 					system := gjson.GetBytes(upstream.lastBody, "system")
-					if system.IsArray() {
-						require.Len(t, system.Array(), 1)
-						require.Equal(t, instructions, system.Array()[0].Get("text").String())
-					} else {
-						require.Equal(t, instructions, system.String())
-					}
+					require.True(t, system.IsArray())
+					require.Len(t, system.Array(), 2)
+					require.Equal(t, claudeCodeSystemPrompt, system.Array()[0].Get("text").String())
+					require.Equal(t, instructions, system.Array()[1].Get("text").String())
 					messages := gjson.GetBytes(upstream.lastBody, "messages").Array()
 					require.Len(t, messages, 1, "must not prepend synthetic instruction or acknowledgement turns")
 					require.Equal(t, "user", messages[0].Get("role").String())
@@ -202,7 +200,7 @@ func TestAnthropicOAuthSignatureErrorsDoNotRewriteOrReplayClientMessages(t *test
 				require.Error(t, err)
 				require.Len(t, upstream.bodies, 1, "OAuth signature errors must not trigger prompt-mutating retries")
 				require.JSONEq(t, gjson.GetBytes(body, "messages").Raw, gjson.GetBytes(upstream.lastBody, "messages").Raw)
-				require.JSONEq(t, gjson.GetBytes(body, "system").Raw, gjson.GetBytes(upstream.lastBody, "system").Raw)
+				requireMinimalIdentityPreservesClientSystem(t, gjson.GetBytes(body, "system"), gjson.GetBytes(upstream.lastBody, "system"))
 				require.ErrorContains(t, err, "Invalid signature")
 				require.Equal(t, http.StatusBadRequest, rec.Code)
 			})
@@ -238,7 +236,7 @@ func TestAnthropicOAuthCompatibilityDoesNotSynthesizeToolOrReasoningText(t *test
 					}
 					require.NoError(t, err)
 					require.Len(t, upstream.bodies, 1)
-					require.False(t, gjson.GetBytes(upstream.lastBody, "system").Exists(), "missing client instructions must stay missing")
+					requireMinimalIdentityPreservesClientSystem(t, gjson.Result{}, gjson.GetBytes(upstream.lastBody, "system"))
 					var textParts []string
 					toolResults := 0
 					for _, message := range gjson.GetBytes(upstream.lastBody, "messages").Array() {

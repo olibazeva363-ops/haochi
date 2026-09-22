@@ -36,7 +36,7 @@ const (
 	claudeAPICountTokensURL = "https://api.anthropic.com/v1/messages/count_tokens?beta=true"
 	stickySessionTTL        = time.Hour // 粘性会话TTL
 	defaultMaxLineSize      = 500 * 1024 * 1024
-	// Canonical banner used to recognize caller-provided Claude Code instructions.
+	// Minimal OAuth identity; also used to recognize caller-provided instructions.
 	claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
 	maxCacheControlBlocks  = 4 // Anthropic API 允许的最大 cache_control 块数量
 

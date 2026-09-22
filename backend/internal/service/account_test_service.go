@@ -465,7 +465,7 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	// Keep OAuth connection probes consistent with prompt-preserving forwarding.
+	// Keep OAuth probes consistent with the minimal identity used for forwarding.
 	payload, err := createTestPayload(testModelID)
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create test payload")
@@ -474,6 +474,9 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		delete(payload, "system")
 	}
 	payloadBytes, _ := json.Marshal(payload)
+	if account.IsAnthropicOAuthOrSetupToken() {
+		payloadBytes = ensureClaudeOAuthIdentityPrompt(payloadBytes)
+	}
 
 	// Send test_start event (skip on SK 401 recovery retry to avoid duplicate events)
 	if attempted, _ := c.Get(skTestRecoveryContextKey); attempted != true {

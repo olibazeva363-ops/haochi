@@ -442,6 +442,9 @@ func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(
 
 // buildCountTokensRequest 构建 count_tokens 上游请求
 func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token, tokenType, modelID string, mimicClaudeCode bool) (*http.Request, []byte, error) {
+	if account.IsAnthropicOAuthOrSetupToken() {
+		body = ensureClaudeOAuthIdentityPrompt(body)
+	}
 	body = stripDeferredToolCacheControl(body)
 	// 确定目标 URL
 	targetURL := claudeAPICountTokensURL
@@ -513,7 +516,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		}
 	}
 
-	// Token counting uses the same unmodified prompt text as message forwarding.
+	// Count the same identity sentence and caller prompts as message forwarding.
 	ctEffectiveDropSet := mergeDropSets(s.getBetaPolicyFilterSet(ctx, c, account, modelID))
 	finalBetaHeader, finalBetaShouldSet := s.computeFinalCountTokensAnthropicBeta(
 		tokenType, mimicClaudeCode, modelID, clientHeaders, body, ctEffectiveDropSet,
