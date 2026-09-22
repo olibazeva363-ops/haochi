@@ -29,6 +29,25 @@ Linux amd64 嵌入前端构建通过，二进制 SHA-256 为 `da72a03d15c6b593cb
 
 全量单元检查的其他包首次通过；更新上述三项旧预期后，service 全包补跑通过（191.066 秒）。最终 golangci-lint 全量检查通过，0 issues。`git diff --check` 通过。
 
-发布结果待上线后补充。日志在本工作树 `.cache/minimal-identity-20260922/`，不包含凭据。真实上线验收使用不自行携带 system 的极短请求，确认站点自动补入后的结果。
+日志在本工作树 `.cache/minimal-identity-20260922/`，不包含凭据。真实上线验收使用不自行携带 system 的极短请求，确认站点自动补入后的结果。
+
+## 实际上线验收
+
+- 代码提交：`523afe6c7ddc7f86d06387cdbc8951475edb1c22`，已推送 main。
+- GitHub Actions Deploy Image：`35689457981`，success；Security Scan：`35689457980`，success。
+- GitHub 全量 CI 记录：[35689458091](https://github.com/olibazeva363-ops/haochi/actions/runs/35689458091)。
+- Watchtower 已自动更新，应用启动时间 `2026-09-22T05:10:27.628168328Z`（北京时间 13:10:27）。
+- 实际运行镜像：`ghcr.io/olibazeva363-ops/haochi@sha256:770a0376ebd04928344c52da63e3eba02cc69871c9f228ad65f2288b89ec363e`，OCI revision 与上述代码提交一致。
+- 容器 running / healthy，restart_count=0；`/health` 返回 200、`status=ok`。
+
+经公网域名 `https://fangwaizhijing.com/v1/messages` 调用，使用原账号/Key，客户端仅发送 `Reply OK.`、`max_tokens=16`，不发送 system：
+
+| 模型 / 方式 | HTTP | 正常结束 | 输入 / 输出 tokens | 耗时 |
+| --- | --- | --- | --- | --- |
+| Sonnet 4.6 非流式 | 200 | end_turn | 25 / 5 | 1.060 秒 |
+| Opus 4.6 非流式 | 200 | end_turn | 25 / 4 | 1.706 秒 |
+| Sonnet 4.6 流式 | 200 | message_stop，无 error 事件 | 25 / 5 | 0.975 秒 |
+
+本次账号的缺失身份提示导致的 429 已在上述三次真实请求中消失。此结果不代表以后所有 429 都与身份提示有关，上游真实额度/速率限制仍按原逻辑处理。以上发布记录后续以文档提交补充，不触发镜像重新构建；线上代码 revision 仍为 `523afe6c7ddc7f86d06387cdbc8951475edb1c22`。
 
 发布沿用 main → GitHub Actions Deploy Image → GHCR latest → Watchtower（60 秒）。无数据库迁移。上线前镜像的可回滚引用为 `ghcr.io/olibazeva363-ops/haochi@sha256:819e41885e5067ab2cde5be9048bf8741943aa70ecf2cee1caaaa43a650ef8cc`；如需回退，在服务器 `/opt/tokenhub` 对 `docker-compose.ghcr.yml` 的 app 服务使用该固定 digest，避免 Watchtower 随 latest 再次更新。
